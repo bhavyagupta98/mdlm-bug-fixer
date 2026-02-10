@@ -2,6 +2,11 @@
 Configuration module for MDLM Bug Fixer
 """
 
+try:
+    from ._version import __version__
+except ImportError:
+    __version__ = "0.1.0"
+
 
 class Config:
     """
@@ -9,7 +14,7 @@ class Config:
     """
     # Default configuration values
     DEBUG = False
-    VERSION = "0.1.0"
+    VERSION = __version__
     
     @classmethod
     def get_config(cls):
