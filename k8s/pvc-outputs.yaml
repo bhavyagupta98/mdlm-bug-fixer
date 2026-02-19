@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mdlm-outputs
+spec:
+  storageClassName: rook-cephfs  # Keep RWX if needed for multi-node
+  accessModes:
+    - ReadWriteMany  # Only if you need multi-node access
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 2000Gi
