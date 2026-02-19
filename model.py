@@ -291,8 +291,9 @@ def main():
         MODEL_NAME,
         trust_remote_code=True,
         torch_dtype=load_dtype,
-        device_map="auto" if cuda else None,
     )
+    if cuda:
+        model = model.cuda()
 
     max_seq_len = int(args.max_seq_len) if args.max_seq_len is not None else get_model_max_len(model)
     print(f"[INFO] Using max_seq_len = model.config.max_position_embeddings = {max_seq_len}")
@@ -337,8 +338,11 @@ def main():
     model.print_trainable_parameters()
 
     # Memory saver
-    if hasattr(model, "gradient_checkpointing_enable"):
+    try:
         model.gradient_checkpointing_enable()
+        print("[INFO] Gradient checkpointing enabled.")
+    except ValueError:
+        print("[WARN] Model does not support gradient checkpointing, skipping.")
 
     args_tf = TrainingArguments(
         output_dir=str(OUT_DIR),
@@ -359,7 +363,20 @@ def main():
         optim="adamw_torch",
     )
 
-    trainer = Trainer(
+    # LLaDA's forward() returns logits only, no loss — compute it ourselves
+    class MDLMTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False):
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            logits = outputs.logits  # (batch, seq_len, vocab)
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100,
+            )
+            return (loss, outputs) if return_outputs else loss
+
+    trainer = MDLMTrainer(
         model=model,
         args=args_tf,
         train_dataset=train_ds,
