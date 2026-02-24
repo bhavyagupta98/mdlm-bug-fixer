@@ -32,10 +32,10 @@ OUT_DIR = BASE_DIR / "runs/llada_lora"
 MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
 
 # Debug: stop after N base records indexed from gzip (set None for full)
-DEBUG_MAX_RECORDS: Optional[int] = 200
+DEBUG_MAX_RECORDS: Optional[int] = None
 
 RANDOM_SEED = 0
-DEFAULT_FALLBACK_MAX_LEN = 2048
+DEFAULT_FALLBACK_MAX_LEN = 1024
 
 
 # ======================
@@ -373,7 +373,7 @@ def main():
     args_tf = TrainingArguments(
         output_dir=str(OUT_DIR),
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=4,
         learning_rate=2e-4,
         weight_decay=0.0,
         warmup_ratio=0.03,
@@ -384,7 +384,7 @@ def main():
         bf16=use_bf16,          # bf16 only
         fp16=False,             # explicitly disabled
         report_to="none",
-        dataloader_num_workers=0,  # Colab stability
+        dataloader_num_workers=4,  # Colab stability
         remove_unused_columns=False,
         optim="adamw_torch",
     )
