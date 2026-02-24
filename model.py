@@ -41,6 +41,16 @@ DEFAULT_FALLBACK_MAX_LEN = 2048
 # ======================
 # HELPERS
 # ======================
+def num_training_samples_from_k(k: int) -> int:
+    """
+    Compute number of training examples for k hunks.
+    Includes all subsets with size >= 2: sum_{r=2..k} C(k,r) = 2^k - k - 1
+    """
+    if k < 2:
+        return 0
+    return (1 << k) - k - 1
+
+
 def _filter_spans(spans: List[List[int]], L: int) -> List[Tuple[int, int]]:
     """
     Clamp spans to [0, L] where L is the current (capped) input length.
@@ -72,14 +82,16 @@ def get_model_max_len(model) -> int:
 # ======================
 class StreamingAllCombosDataset(Dataset):
     """
-    Each base JSONL record becomes (2^k - 1) training examples, where k is the number
-    of valid hunk spans. We enumerate ALL non-empty subsets of hunks:
-      size 1, 2, ..., k.
+    Each base JSONL record becomes (2^k - k - 1) training examples, where k is the number
+    of valid hunk spans. We enumerate ALL subsets of hunks with size >= 2:
+      size 2, 3, ..., k.
+    This focuses on multi-hunk error infilling, aligning with iterative denoising inference.
 
     Memory use:
       - offsets: one int per base record
       - k_valid: one small int per base record
-      - prefix: one int per base record (cumulative expanded examples)
+      - valid_masks: list of valid subset masks per record
+      - prefix: one int per base record (cumulative expanded example counts)
     """
     def __init__(self, path: Path, max_records: Optional[int], max_seq_len: int):
         self.path = path
@@ -87,6 +99,7 @@ class StreamingAllCombosDataset(Dataset):
 
         self.offsets: List[int] = []
         self.k_valid: List[int] = []
+        self.valid_masks: List[List[int]] = []  # valid subset masks per record
         self.prefix: List[int] = [0]  # prefix sums of expanded example counts
 
         with gzip.open(self.path, "rb") as f:
@@ -115,20 +128,26 @@ class StreamingAllCombosDataset(Dataset):
                 filtered = _filter_spans(spans, L)
                 k = len(filtered)
 
-                # keep records with at least 1 valid hunk
-                if k >= 1:
-                    self.offsets.append(pos)
-                    self.k_valid.append(k)
+                # keep records with at least 2 valid hunks (for multi-hunk masking)
+                if k >= 2:
+                    # Generate all subsets with 2+ hunks (minimum 2 bits set)
+                    valid = []
+                    for mask in range(1, (1 << k)):
+                        if bin(mask).count('1') >= 2:  # At least 2 bits set
+                            valid.append(mask)
+                    
+                    n_sub = len(valid)
+                    if n_sub > 0:
+                        self.offsets.append(pos)
+                        self.k_valid.append(k)
+                        self.valid_masks.append(valid)
+                        self.prefix.append(self.prefix[-1] + n_sub)
 
-                    # expanded examples per record
-                    n_sub = (1 << k) - 1
-                    self.prefix.append(self.prefix[-1] + n_sub)
-
-                    if max_records is not None and len(self.offsets) >= max_records:
-                        break
+                        if max_records is not None and len(self.offsets) >= max_records:
+                            break
 
         if not self.offsets:
-            raise RuntimeError(f"No usable records found in {self.path}")
+            raise RuntimeError(f"No usable records found in {self.path} (need k >= 2 hunks)")
 
     def __len__(self) -> int:
         return self.prefix[-1]
@@ -136,15 +155,15 @@ class StreamingAllCombosDataset(Dataset):
     def _locate(self, global_idx: int) -> Tuple[int, int]:
         """
         Map global example idx -> (record_idx, subset_mask)
-        subset_mask in [1 .. 2^k - 1], bits correspond to which hunks to mask.
+        subset_mask is a valid mask with 2+ bits set.
         """
         if global_idx < 0 or global_idx >= len(self):
             raise IndexError(global_idx)
 
         r = bisect.bisect_right(self.prefix, global_idx) - 1
         base = self.prefix[r]
-        local = global_idx - base  # 0..(2^k-2)
-        subset_mask = local + 1    # 1..(2^k-1)
+        local = global_idx - base  # Index within this record's valid masks
+        subset_mask = self.valid_masks[r][local]
         return r, subset_mask
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
@@ -168,8 +187,8 @@ class StreamingAllCombosDataset(Dataset):
         filtered_spans = _filter_spans(spans, L)
         k = len(filtered_spans)
 
-        # Defensive: if something changed, avoid crash
-        if k < 1:
+        # Defensive: if something changed, require k >= 2
+        if k < 2:
             chosen_spans: List[Tuple[int, int]] = []
         else:
             chosen_spans = [filtered_spans[i] for i in range(k) if (subset_mask >> i) & 1]
@@ -272,7 +291,12 @@ def main():
         print(f"[INFO] DRY-RUN: using --max-seq-len={max_seq_len} (model not loaded)")
         print("[INFO] Indexing dataset:", TRAIN_GZ)
         train_ds = StreamingAllCombosDataset(TRAIN_GZ, max_records=args.max_records, max_seq_len=max_seq_len)
-        print(f"[INFO] Expanded examples: {len(train_ds):,} (from {len(train_ds.offsets):,} base records)")
+        print(f"[INFO] Base records (k >= 2 hunks): {len(train_ds.offsets):,}")
+        print(f"[INFO] Total expanded examples: {len(train_ds):,}")
+        print(f"[INFO] Example per-record counts (k -> training samples):")
+        for k in range(2, 8):
+            samples = num_training_samples_from_k(k)
+            print(f"       k={k} hunks -> {samples} training samples")
         collator = HunkCollator(pad_token_id=tokenizer.pad_token_id)
 
         print("[DRY-RUN] Building one batch...")
@@ -300,7 +324,9 @@ def main():
 
     print("[INFO] Indexing dataset:", TRAIN_GZ)
     train_ds = StreamingAllCombosDataset(TRAIN_GZ, max_records=args.max_records, max_seq_len=max_seq_len)
-    print(f"[INFO] Expanded examples: {len(train_ds):,} (from {len(train_ds.offsets):,} base records)")
+    print(f"[INFO] Base records (k >= 2 hunks): {len(train_ds.offsets):,}")
+    print(f"[INFO] Total expanded examples: {len(train_ds):,}")
+    print(f"[INFO] Per-record sample formula: 2^k - k - 1 for k hunks")
 
     collator = HunkCollator(pad_token_id=tokenizer.pad_token_id)
 
