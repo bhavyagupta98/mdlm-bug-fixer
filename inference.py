@@ -44,6 +44,16 @@ MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
 # ============================================================
 # HELPERS (reused from model.py)
 # ============================================================
+def num_training_samples_from_k(k: int) -> int:
+    """
+    Compute number of training examples for k hunks.
+    Includes all subsets with size >= 2: sum_{r=2..k} C(k,r) = 2^k - k - 1
+    """
+    if k < 2:
+        return 0
+    return (1 << k) - k - 1
+
+
 def _filter_spans(spans: List[List[int]], L: int) -> List[Tuple[int, int]]:
     """Clamp spans to [0, L]."""
     filtered: List[Tuple[int, int]] = []
@@ -394,6 +404,9 @@ def evaluate(
             pred_masked.extend(pred_list[s:e])
             gt_masked.extend(gt_list[s:e])
 
+        # Expected training samples for this record (k hunks -> 2^k - k - 1 samples)
+        training_samples_for_record = num_training_samples_from_k(len(spans))
+
         # Metrics
         em_rate = token_exact_match_rate(pred_masked, gt_masked)
         hunk_results = per_hunk_exact_match(pred_list, gt_list, spans)
@@ -430,6 +443,7 @@ def evaluate(
             "id": record["id"],
             "seq_len": len(record["input_ids"]),
             "num_hunks": len(spans),
+            "training_samples_generated": training_samples_for_record,
             "total_masked_tokens": int(num_masked),
             "token_exact_match": em_rate,
             "per_hunk_exact": hunk_results,
@@ -453,8 +467,8 @@ def evaluate(
         status = "ALL_CORRECT" if ahc else f"EM={em_rate:.2f}"
         print(
             f"  [{i+1}] id={record['id'][:12]}.. "
-            f"hunks={len(spans)} masked={int(num_masked)} "
-            f"{status} CE={sp_ce:.3f} t={wall_time:.1f}s"
+            f"hunks={len(spans)} (gen {training_samples_for_record} train samples) "
+            f"masked={int(num_masked)} {status} CE={sp_ce:.3f} t={wall_time:.1f}s"
         )
 
     if results_file:

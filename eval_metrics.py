@@ -163,9 +163,13 @@ class MetricsAggregator:
             if "per_hunk_exact" in r:
                 all_hunk_results.extend(r["per_hunk_exact"])
 
+        # Total training samples across all evaluated records
+        total_training_samples = sum(r.get("training_samples_generated", 0) for r in self.records)
+
         return {
             "num_records": n,
             "num_hunks_total": len(all_hunk_results),
+            "total_training_samples": total_training_samples,
             "token_exact_match": _mean("token_exact_match"),
             "per_hunk_accuracy": (
                 sum(all_hunk_results) / len(all_hunk_results)
