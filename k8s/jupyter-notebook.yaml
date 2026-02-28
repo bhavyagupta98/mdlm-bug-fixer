@@ -21,11 +21,11 @@ spec:
 
     resources:
       limits:
-        nvidia.com/rtxa6000: "1"
+        nvidia.com/a100: "1"
         memory: "32Gi"
         cpu: "2"
       requests:
-        nvidia.com/rtxa6000: "1"
+        nvidia.com/a100: "1"
         memory: "32Gi"
         cpu: "2"
 
@@ -82,15 +82,15 @@ spec:
     #   operator: Exists
     #   effect: NoSchedule
 
-  # affinity:
-  #   nodeAffinity:
-  #     requiredDuringSchedulingIgnoredDuringExecution:
-  #       nodeSelectorTerms:
-  #       - matchExpressions:
-  #         - key: nvidia.com/gpu.product
-  #           operator: In
-  #           values:
-  #           - NVIDIA-A100-SXM4-80GB
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: nvidia.com/gpu.product
+            operator: In
+            values:
+            - NVIDIA-A100-SXM4-80GB
 
   volumes:
     - name: cache-volume

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import gzip
+import hashlib
 import json
 import os
 import argparse
@@ -36,11 +37,19 @@ DEBUG_MAX_RECORDS: Optional[int] = 200
 
 RANDOM_SEED = 0
 DEFAULT_FALLBACK_MAX_LEN = 2048
+TEST_FRACTION = 0.1
+SPLIT_SEED = 42
 
 
 # ======================
 # HELPERS
 # ======================
+def record_split(record_id: str, test_fraction: float = TEST_FRACTION, seed: int = SPLIT_SEED) -> str:
+    """Deterministic hash-based train/test assignment. Must match inference.py."""
+    h = hashlib.sha256(f"{seed}:{record_id}".encode()).hexdigest()
+    if int(h[:8], 16) / 0xFFFFFFFF < test_fraction:
+        return "test"
+    return "train"
 def _filter_spans(spans: List[List[int]], L: int) -> List[Tuple[int, int]]:
     """
     Clamp spans to [0, L] where L is the current (capped) input length.
@@ -81,14 +90,16 @@ class StreamingAllCombosDataset(Dataset):
       - k_valid: one small int per base record
       - prefix: one int per base record (cumulative expanded examples)
     """
-    def __init__(self, path: Path, max_records: Optional[int], max_seq_len: int):
+    def __init__(self, path: Path, max_records: Optional[int], max_seq_len: int, split: str = "train"):
         self.path = path
         self.max_seq_len = int(max_seq_len)
+        self.split = split
 
         self.offsets: List[int] = []
         self.k_valid: List[int] = []
         self.prefix: List[int] = [0]  # prefix sums of expanded example counts
 
+        n_skipped_split = 0
         with gzip.open(self.path, "rb") as f:
             while True:
                 pos = f.tell()
@@ -102,6 +113,13 @@ class StreamingAllCombosDataset(Dataset):
                     ex = json.loads(line.decode("utf-8"))
                 except Exception:
                     continue
+
+                # Filter by train/test split
+                if split != "all":
+                    record_id = ex.get("id", ex.get("commit", "NA"))
+                    if record_split(record_id) != split:
+                        n_skipped_split += 1
+                        continue
 
                 input_ids = ex.get("input_ids", [])
                 spans = ex.get("hunk_token_spans", [])
@@ -129,6 +147,8 @@ class StreamingAllCombosDataset(Dataset):
 
         if not self.offsets:
             raise RuntimeError(f"No usable records found in {self.path}")
+        if split != "all":
+            print(f"[INFO] Split='{split}': kept {len(self.offsets)} records, skipped {n_skipped_split} ({split} only)")
 
     def __len__(self) -> int:
         return self.prefix[-1]
@@ -239,6 +259,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train LoRA on ALL hunk subsets (2^k-1 per record), bf16 only (no fp16)")
     parser.add_argument("--dry-run", action="store_true", help="Dataset+collator dry run and exit")
     parser.add_argument("--max-records", type=int, default=DEBUG_MAX_RECORDS, help="Limit number of base gzip records to index")
+    parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"],
+                        help="Which data split to train on (default: train)")
     parser.add_argument("--use-bf16", action="store_true", help="Use bf16 if supported by GPU (otherwise float32)")
     parser.add_argument(
         "--max-seq-len",
@@ -271,7 +293,7 @@ def main():
         max_seq_len = int(args.max_seq_len)
         print(f"[INFO] DRY-RUN: using --max-seq-len={max_seq_len} (model not loaded)")
         print("[INFO] Indexing dataset:", TRAIN_GZ)
-        train_ds = StreamingAllCombosDataset(TRAIN_GZ, max_records=args.max_records, max_seq_len=max_seq_len)
+        train_ds = StreamingAllCombosDataset(TRAIN_GZ, max_records=args.max_records, max_seq_len=max_seq_len, split=args.split)
         print(f"[INFO] Expanded examples: {len(train_ds):,} (from {len(train_ds.offsets):,} base records)")
         collator = HunkCollator(pad_token_id=tokenizer.pad_token_id)
 
@@ -299,7 +321,7 @@ def main():
     print(f"[INFO] Using max_seq_len = model.config.max_position_embeddings = {max_seq_len}")
 
     print("[INFO] Indexing dataset:", TRAIN_GZ)
-    train_ds = StreamingAllCombosDataset(TRAIN_GZ, max_records=args.max_records, max_seq_len=max_seq_len)
+    train_ds = StreamingAllCombosDataset(TRAIN_GZ, max_records=args.max_records, max_seq_len=max_seq_len, split=args.split)
     print(f"[INFO] Expanded examples: {len(train_ds):,} (from {len(train_ds.offsets):,} base records)")
 
     collator = HunkCollator(pad_token_id=tokenizer.pad_token_id)
@@ -346,7 +368,7 @@ def main():
 
     args_tf = TrainingArguments(
         output_dir=str(OUT_DIR),
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=4,
         gradient_accumulation_steps=8,
         learning_rate=2e-4,
         weight_decay=0.0,
