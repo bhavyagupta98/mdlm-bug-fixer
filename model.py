@@ -368,7 +368,7 @@ def main():
 
     args_tf = TrainingArguments(
         output_dir=str(OUT_DIR),
-        per_device_train_batch_size=4,
+        per_device_train_batch_size=2,
         gradient_accumulation_steps=8,
         learning_rate=2e-4,
         weight_decay=0.0,
