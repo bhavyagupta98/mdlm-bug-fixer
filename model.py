@@ -33,7 +33,7 @@ OUT_DIR = BASE_DIR / "runs/llada_lora"
 MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
 
 # Debug: stop after N base records indexed from gzip (set None for full)
-DEBUG_MAX_RECORDS: Optional[int] = 200
+DEBUG_MAX_RECORDS: Optional[int] = None
 
 RANDOM_SEED = 0
 DEFAULT_FALLBACK_MAX_LEN = 2048
