@@ -1,4 +1,4 @@
-apiVersion: v1
+-apiVersion: v1
 kind: Pod
 metadata:
   name: vlm-jupyter-debug
@@ -98,7 +98,7 @@ spec:
         sizeLimit: 100Gi
     - name: outputs-volume
       persistentVolumeClaim:
-        claimName: mdlm-outputs
+        claimName: bgupta-pvc
     - name: dev-shm
       emptyDir:
         medium: Memory
