@@ -80,8 +80,9 @@ FIM_PRESETS: Dict[str, Dict[str, Any]] = {
     "deepseek-coder": {
         "model":  "deepseek-ai/deepseek-coder-6.7b-base",
         "prefix": "<\uff5cfim\u25a0begin\uff5c>",
-        "suffix": "<\uff5cfim\u25a0suffix\uff5c>",
-        "middle": "<\uff5cfim\u25a0hole\uff5c>",
+        # DeepSeek FIM expects: begin + prefix + hole + suffix + end
+        "suffix": "<\uff5cfim\u25a0hole\uff5c>",
+        "middle": "<\uff5cfim\u25a0end\uff5c>",
     },
     "starcoder2": {
         "model":  "bigcode/starcoder2-7b",
@@ -129,6 +130,59 @@ def _filter_spans(spans: List[Any], L: int) -> List[Tuple[int, int]]:
 
 def decode_ids(tokenizer, ids: List[int]) -> str:
     return tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+
+
+def validate_fim_template(tokenizer, preset: Dict[str, Any], model_label: str) -> None:
+    """Validate that FIM control tokens exist and appear in prefix->suffix->middle order."""
+    roles = ("prefix", "suffix", "middle")
+    tok_ids: Dict[str, Optional[int]] = {}
+
+    for role in roles:
+        tok_str = preset[role]
+        tok_id = tokenizer.convert_tokens_to_ids(tok_str)
+        tok_ids[role] = tok_id
+        if tok_id is None or tok_id == tokenizer.unk_token_id:
+            print(
+                f"[WARN] {model_label}: FIM token '{tok_str}' ({role}) is not recognized by tokenizer."
+            )
+
+    if any(tok_ids[r] is None for r in roles):
+        return
+
+    sample_prefix = "int x = 1;"
+    sample_suffix = "return x;"
+    fim_input = (
+        preset["prefix"] + sample_prefix
+        + preset["suffix"] + sample_suffix
+        + preset["middle"]
+    )
+    encoded = tokenizer(fim_input, add_special_tokens=False)["input_ids"]
+
+    def first_pos(token_id: int) -> Optional[int]:
+        try:
+            return encoded.index(token_id)
+        except ValueError:
+            return None
+
+    pos_prefix = first_pos(tok_ids["prefix"])
+    pos_suffix = first_pos(tok_ids["suffix"])
+    pos_middle = first_pos(tok_ids["middle"])
+
+    if (
+        pos_prefix is None
+        or pos_suffix is None
+        or pos_middle is None
+        or not (pos_prefix < pos_suffix < pos_middle)
+    ):
+        print(
+            f"[WARN] {model_label}: FIM template tokenization order is invalid "
+            f"(prefix={pos_prefix}, suffix={pos_suffix}, middle={pos_middle})."
+        )
+    else:
+        print(
+            f"[INFO] {model_label}: FIM template validated "
+            f"(prefix={tok_ids['prefix']}, suffix={tok_ids['suffix']}, middle={tok_ids['middle']})."
+        )
 
 
 # ============================================================
@@ -219,11 +273,7 @@ class FIMBaseline:
         self.max_new_tokens   = max_new_tokens
         self.source_tokenizer = source_tokenizer
 
-        for role in ("prefix", "suffix", "middle"):
-            tok_str = preset[role]
-            tok_id  = tokenizer.convert_tokens_to_ids(tok_str)
-            if tok_id == tokenizer.unk_token_id:
-                print(f"[WARN] FIM token '{tok_str}' not in vocab -- FIM quality may degrade.")
+        validate_fim_template(tokenizer, preset, preset.get("model", "fim-model"))
 
     @torch.no_grad()
     def _fill_one(self, prefix_text: str, suffix_text: str) -> str:

@@ -23,18 +23,18 @@ mkdir -p "$MDLM_EVAL_DIR" "$BASELINES_OUT_DIR"
 echo "[INFO] Root: $ROOT_DIR"
 echo "[INFO] Run directory: $RUN_DIR"
 
-echo "[STEP 1/4] Training MDLM with max-records=1000"
-python model.py \
-  --use-bf16 \
-  --max-records 1000
+# echo "[STEP 1/4] Training MDLM with max-records=1000"
+# python model.py \
+#   --use-bf16 \
+#   --max-records 1000
 
-echo "[STEP 2/4] Evaluating MDLM on 200 records"
-python inference.py \
-  --adapter-path "$ROOT_DIR/runs/llada_lora/lora_adapter" \
-  --split test \
-  --max-records 200 \
-  --codebleu \
-  --output-dir "$MDLM_EVAL_DIR"
+# echo "[STEP 2/4] Evaluating MDLM on 200 records"
+# python inference.py \
+#   --adapter-path "$ROOT_DIR/runs/llada_lora/lora_adapter" \
+#   --split test \
+#   --max-records 200 \
+#   --codebleu \
+#   --output-dir "$MDLM_EVAL_DIR"
 
 echo "[STEP 3/4] Evaluating FIM baselines on 200 records each"
 FIM_MODELS=(
