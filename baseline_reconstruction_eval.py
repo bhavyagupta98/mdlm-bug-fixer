@@ -79,10 +79,10 @@ RANDOM_SEED           = 0
 FIM_PRESETS: Dict[str, Dict[str, Any]] = {
     "deepseek-coder": {
         "model":  "deepseek-ai/deepseek-coder-6.7b-base",
-        "prefix": "<\uff5cfim\u25a0begin\uff5c>",
+        "prefix": "<\uff5cfim\u2581begin\uff5c>",
         # DeepSeek FIM expects: begin + prefix + hole + suffix + end
-        "suffix": "<\uff5cfim\u25a0hole\uff5c>",
-        "middle": "<\uff5cfim\u25a0end\uff5c>",
+        "suffix": "<\uff5cfim\u2581hole\uff5c>",
+        "middle": "<\uff5cfim\u2581end\uff5c>",
     },
     "starcoder2": {
         "model":  "bigcode/starcoder2-7b",
