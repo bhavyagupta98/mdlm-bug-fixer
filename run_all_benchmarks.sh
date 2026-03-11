@@ -14,11 +14,12 @@ TS="$(date +"%Y%m%d_%H%M%S")"
 RUN_DIR="$ROOT_DIR/runs/benchmark_${TS}"
 MDLM_EVAL_DIR="$RUN_DIR/mdlm_eval"
 BASELINES_OUT_DIR="$RUN_DIR/baselines"
+LLADA_BASE_EVAL_DIR="$RUN_DIR/llada_base_eval"
 COMBINED_JSON="$RUN_DIR/combined_results.json"
 COMPARISON_JSON="$RUN_DIR/comparison_table.json"
 COMPARISON_CSV="$RUN_DIR/comparison_table.csv"
 
-mkdir -p "$MDLM_EVAL_DIR" "$BASELINES_OUT_DIR"
+mkdir -p "$MDLM_EVAL_DIR" "$BASELINES_OUT_DIR" "$LLADA_BASE_EVAL_DIR"
 
 echo "[INFO] Root: $ROOT_DIR"
 echo "[INFO] Run directory: $RUN_DIR"
@@ -39,21 +40,28 @@ echo "[INFO] Run directory: $RUN_DIR"
 echo "[STEP 3/4] Evaluating FIM baselines on 200 records each"
 FIM_MODELS=(
   deepseek-coder
-  starcoder2
   codellama
 )
 
-for model_name in "${FIM_MODELS[@]}"; do
-  echo "  [BASELINE] $model_name"
-  python baseline_reconstruction_eval.py \
-    --strategy fim \
-    --baseline "$model_name" \
-    --max-records 200 \
-    --num-samples 1 \
-    --k 1 \
-    --language java \
-    --out-dir "$BASELINES_OUT_DIR"
-done
+# for model_name in "${FIM_MODELS[@]}"; do
+#   echo "  [BASELINE] $model_name"
+#   python baseline_reconstruction_eval.py \
+#     --strategy fim \
+#     --baseline "$model_name" \
+#     --max-records 200 \
+#     --num-samples 1 \
+#     --k 1 \
+#     --language java \
+#     --out-dir "$BASELINES_OUT_DIR"
+# done
+
+echo "[STEP 3.5/4] Evaluating base LLaDA (no LoRA fine-tuning) on 200 records"
+python inference.py \
+  --no-adapter \
+  --split test \
+  --max-records 200 \
+  --codebleu \
+  --output-dir "$LLADA_BASE_EVAL_DIR"
 
 echo "[STEP 4/4] Aggregating results into one JSON"
 python - <<PYEOF
@@ -64,6 +72,7 @@ from pathlib import Path
 run_dir = Path(r"$RUN_DIR")
 mdlm_dir = Path(r"$MDLM_EVAL_DIR")
 baselines_dir = Path(r"$BASELINES_OUT_DIR")
+llada_base_dir = Path(r"$LLADA_BASE_EVAL_DIR")
 out_file = Path(r"$COMBINED_JSON")
 comparison_json = Path(r"$COMPARISON_JSON")
 comparison_csv = Path(r"$COMPARISON_CSV")
@@ -77,6 +86,10 @@ baseline_summaries = {}
 for p in sorted(baselines_dir.glob("fim_*/eval_summary.json")):
     key = p.parent.name
     baseline_summaries[key] = json.loads(p.read_text())
+
+llada_base_candidates = sorted(llada_base_dir.glob("summary_*.json"))
+if llada_base_candidates:
+  baseline_summaries["llada_base"] = json.loads(llada_base_candidates[-1].read_text())
 
 combined = {
     "run_dir": str(run_dir),

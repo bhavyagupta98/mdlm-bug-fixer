@@ -247,6 +247,11 @@ def load_model_and_tokenizer(
         model = PeftModel.from_pretrained(model, adapter_path)
         print("[INFO] Merging LoRA weights into base model...")
         model = model.merge_and_unload()
+    elif adapter_path:
+        print(f"[INFO] Adapter path provided but not found: {adapter_path}")
+        print("[INFO] Continuing with base model only (no LoRA adapter merged).")
+    else:
+        print("[INFO] --no-adapter enabled: running base model only (no LoRA adapter).")
 
     if device == "cuda" and torch.cuda.is_available():
         model = model.cuda()
@@ -606,6 +611,11 @@ def main():
     output_dir = Path(args.output_dir)
 
     adapter = None if args.no_adapter else args.adapter_path
+    if args.no_adapter:
+        print("[INFO] Inference mode: base model only")
+    else:
+        print(f"[INFO] Inference mode: adapter path = {args.adapter_path}")
+
     model, tokenizer = load_model_and_tokenizer(
         base_model_name=args.base_model,
         adapter_path=adapter,
