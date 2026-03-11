@@ -49,8 +49,8 @@ for model_name in "${FIM_MODELS[@]}"; do
     --strategy fim \
     --baseline "$model_name" \
     --max-records 200 \
-    --num-samples 1 \
-    --k 1 \
+    --num-samples 3 \
+    --k 3 \
     --language java \
     --out-dir "$BASELINES_OUT_DIR"
 done

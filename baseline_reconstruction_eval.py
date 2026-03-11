@@ -272,8 +272,23 @@ class FIMBaseline:
         self.device           = device
         self.max_new_tokens   = max_new_tokens
         self.source_tokenizer = source_tokenizer
+        self._stop_markers    = [preset["prefix"], preset["suffix"], preset["middle"]]
 
         validate_fim_template(tokenizer, preset, preset.get("model", "fim-model"))
+
+    def _decode_middle(self, generated_ids: torch.Tensor) -> str:
+        """Decode generated FIM output and trim anything after control markers."""
+        txt = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
+
+        cut = len(txt)
+        for marker in self._stop_markers:
+            pos = txt.find(marker)
+            if pos != -1:
+                cut = min(cut, pos)
+
+        txt = txt[:cut]
+        # Keep whitespace exactly where meaningful, but remove common trailing padding noise.
+        return txt.rstrip("\u0000")
 
     @torch.no_grad()
     def _fill_one(self, prefix_text: str, suffix_text: str) -> str:
@@ -296,7 +311,7 @@ class FIMBaseline:
             eos_token_id=self.tokenizer.eos_token_id,
         )
         gen = out[0][enc["input_ids"].size(1):]
-        return self.tokenizer.decode(gen, skip_special_tokens=True)
+        return self._decode_middle(gen)
 
     def run(self, record: Record, num_samples: int = 1) -> List[List[str]]:
         """
@@ -335,9 +350,7 @@ class FIMBaseline:
                             pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
                             eos_token_id=self.tokenizer.eos_token_id,
                         )
-                    filled = self.tokenizer.decode(
-                        out[0][enc["input_ids"].size(1):], skip_special_tokens=True
-                    )
+                    filled = self._decode_middle(out[0][enc["input_ids"].size(1):])
 
                 patches.append(filled)
 
