@@ -1,23 +1,23 @@
--apiVersion: v1
+apiVersion: v1
 kind: Pod
 metadata:
-  name: vlm-jupyter-debug
+  name: carla
   labels:
-    app: mdlm-code-fixer
+    app: carla
     task: debugger
 spec:
   restartPolicy: Never
   containers:
-  - name: jupyter-container
+  - name: carla
     image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
     command:
       - bash
       - -c
       - |
         apt-get update && apt-get install -y git &&
-        pip install --no-cache-dir jupyterlab "transformers==4.44.2" peft accelerate bitsandbytes &&
-        git clone https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
-        jupyter lab --ip=0.0.0.0 --no-browser --allow-root --notebook-dir=/workspace/mdlm-bug-fixer --NotebookApp.token=selfimprove
+        pip install --root-user-action=ignore --no-cache-dir jupyterlab "transformers==4.44.2" peft accelerate bitsandbytes &&
+        git clone -b final --single-branch https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
+        jupyter lab --ip=0.0.0.0 --no-browser --allow-root --ServerApp.root_dir=/workspace/mdlm-bug-fixer --IdentityProvider.token=selfimprove
 
     resources:
       limits:

@@ -1,684 +1,729 @@
 #!/usr/bin/env python3
 """
-Train and evaluate strong autoregressive reconstruction baselines on the same
-multi-hunk processed dataset used by the masked diffusion pipeline.
+Zero-shot baseline evaluation for multi-hunk infilling.
 
-What this script assumes
-------------------------
-- The .jsonl.gz file already contains:
-    * input_ids               : tokenized clean/fixed code in SOURCE tokenizer space
-    * hunk_token_spans        : spans of repair regions in SOURCE tokenizer space
-    * mask_token_id           : present but not needed here
-- One base record expands to multiple subset-of-hunk training samples.
-- We split at the BASE RECORD level first, then expand, to avoid leakage.
+Compares against MDLM (model.py / inference.py) on an apples-to-apples basis:
 
-What baseline setting this implements
--------------------------------------
-This is a *localized reconstruction* baseline, not a no-localization baseline.
-Each example gets oracle masked spans and must reconstruct the gold content in
-those spans autoregressively.
+  Strategy A - FIM chaining  (fill-in-the-middle native models)
+    Models:
+      deepseek-coder  : deepseek-ai/deepseek-coder-6.7b-base
+      starcoder2      : bigcode/starcoder2-7b
+      codellama       : codellama/CodeLlama-7b-hf
+    Each hunk is filled sequentially using the model's native FIM tokens.
+    After each hunk is filled the working code is updated, so downstream
+    hunks see already-repaired prefix/suffix context -- mirroring iterative
+    denoising in MDLM.
 
-Supported baselines
--------------------
-- qwen       -> Qwen/Qwen2.5-Coder-7B-Instruct
-- starcoder2 -> bigcode/starcoder2-7b
-You can also pass a raw Hugging Face model name via --model-name.
+  Strategy B - instruct zero-shot  (chat / instruct models)
+    Models:
+      qwen              : Qwen/Qwen2.5-Coder-7B-Instruct
+      deepseek-instruct : deepseek-ai/deepseek-coder-7b-instruct-v1.5
+    A single prompt names all masked regions; the model returns PATCH_i lines.
+    No fine-tuning.  This is the minimal AR reference point.
 
-Evaluation
-----------
-This script reuses evaluation.py when available and additionally reports:
-- pass@k                     : exact full-code hit among k sampled candidates
-- localization_accuracy      : 1.0 here, because spans are oracle
-- patch_minimality           : normalized patch edit quality
-- generation_efficiency      : decode speed / generated token counts
+Both strategies use the same evaluation.py metrics, producing results directly
+comparable to inference.py (MDLM).
+
+Usage:
+  # FIM chaining with deepseek-coder (default)
+  python baseline_reconstruction_eval.py --strategy fim
+
+  # FIM with starcoder2
+  python baseline_reconstruction_eval.py --strategy fim --baseline starcoder2
+
+  # Instruct zero-shot with Qwen
+  python baseline_reconstruction_eval.py --strategy instruct --baseline qwen
+
+  # pass@10 sampling
+  python baseline_reconstruction_eval.py --strategy instruct --num-samples 10 --k 10
+
+  # Quick sanity check
+  python baseline_reconstruction_eval.py --strategy fim --dry-run --max-records 5
 """
 
 import argparse
-import bisect
 import gzip
 import json
-import random
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-from torch.utils.data import Dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
-from peft import LoraConfig, get_peft_model
+from evaluation import (
+    MetricsAggregator,
+    all_hunks_correct,
+    compute_codebleu,
+    normalized_edit_distance,
+    pass_at_k_unbiased,
+    patch_bleu,
+    patch_string_exact_match,
+    token_edit_distance,
+)
 
-# Optional reuse of your existing evaluation helpers.
-try:
-    from eval_metrics import (
-        token_exact_match_rate,
-        token_edit_distance,
-        compute_codebleu,
-        MetricsAggregator,
-    )
-except Exception:
-    token_exact_match_rate = None
-    token_edit_distance = None
-    compute_codebleu = None
-    MetricsAggregator = None
-
-
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_TRAIN_GZ = BASE_DIR / "processed_train.jsonl.gz"
-DEFAULT_OUT_DIR = BASE_DIR / "runs"
+# ============================================================
+# CONSTANTS
+# ============================================================
+BASE_DIR              = Path(__file__).resolve().parent
+DEFAULT_DATA_GZ       = BASE_DIR / "processed_train.jsonl.gz"
+DEFAULT_OUT_DIR       = BASE_DIR / "runs" / "baselines"
 SOURCE_TOKENIZER_NAME = "GSAI-ML/LLaDA-8B-Instruct"
-DEFAULT_FALLBACK_MAX_LEN = 2048
-RANDOM_SEED = 0
+DEFAULT_MAX_LEN       = 4096
+RANDOM_SEED           = 0
 
-BASELINE_PRESETS = {
-    "qwen": "Qwen/Qwen2.5-Coder-7B-Instruct",
-    "starcoder2": "bigcode/starcoder2-7b",
+# ---- FIM model presets ----
+# Each entry has the HF model ID and the three FIM special-token strings.
+FIM_PRESETS: Dict[str, Dict[str, Any]] = {
+    "deepseek-coder": {
+        "model":  "deepseek-ai/deepseek-coder-6.7b-base",
+        "prefix": "<\uff5cfim\u25a0begin\uff5c>",
+        "suffix": "<\uff5cfim\u25a0suffix\uff5c>",
+        "middle": "<\uff5cfim\u25a0hole\uff5c>",
+    },
+    "starcoder2": {
+        "model":  "bigcode/starcoder2-7b",
+        "prefix": "<fim_prefix>",
+        "suffix": "<fim_suffix>",
+        "middle": "<fim_middle>",
+    },
+    "codellama": {
+        "model":  "codellama/CodeLlama-7b-hf",
+        "prefix": "\u2581<PRE>",
+        "suffix": "\u2581<SUF>",
+        "middle": "\u2581<MID>",
+    },
 }
 
-PATCH_RE = re.compile(r"<PATCH_(\d+)>(.*?)</PATCH_\1>", re.DOTALL)
+# ---- Instruct model presets ----
+INSTRUCT_PRESETS: Dict[str, str] = {
+    "qwen":              "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "deepseek-instruct": "deepseek-ai/deepseek-coder-7b-instruct-v1.5",
+}
 
+PATCH_LINE_RE = re.compile(r"^\s*PATCH_(\d+)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
+
+
+# ============================================================
+# HELPERS
+# ============================================================
 
 def set_seed(seed: int) -> None:
+    import random
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-def get_model_max_len(model) -> int:
-    cfg = getattr(model, "config", None)
-    if cfg is None:
-        return DEFAULT_FALLBACK_MAX_LEN
-    for attr in ["max_position_embeddings", "n_positions", "seq_length"]:
-        v = getattr(cfg, attr, None)
-        if v is not None:
-            return int(v)
-    return DEFAULT_FALLBACK_MAX_LEN
-
-
-def _filter_spans(spans: List[List[int]], L: int) -> List[Tuple[int, int]]:
-    filtered: List[Tuple[int, int]] = []
-    for s, e in spans:
-        s = max(0, int(s))
-        e = min(L, int(e))
-        if e > s:
-            filtered.append((s, e))
-    return filtered
-
-
-def all_valid_subset_masks(k: int, min_hunks: int = 2) -> List[int]:
+def _filter_spans(spans: List[Any], L: int) -> List[Tuple[int, int]]:
     out = []
-    for mask in range(1, 1 << k):
-        if bin(mask).count('1') >= min_hunks:
-            out.append(mask)
+    for s, e in spans:
+        s, e = max(0, int(s)), min(L, int(e))
+        if e > s:
+            out.append((s, e))
     return out
 
 
-def decode_tokens(tok, ids: Sequence[int]) -> str:
-    return tok.decode(
-        list(ids),
-        skip_special_tokens=False,
-        clean_up_tokenization_spaces=False,
-    )
+def decode_ids(tokenizer, ids: List[int]) -> str:
+    return tokenizer.decode(ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
 
 
-def build_masked_code_and_targets(
-    source_tokenizer,
-    source_input_ids: List[int],
-    chosen_spans: List[Tuple[int, int]],
-) -> Tuple[str, List[str], str]:
-    """
-    Returns
-    -------
-    masked_code_text : full code with <BUG_MASK_i> placeholders
-    patch_texts      : gold text for each chosen hunk in order
-    full_code_text   : original clean/fixed full code
-    """
-    full_code_text = decode_tokens(source_tokenizer, source_input_ids)
-
-    chosen_spans = sorted(chosen_spans, key=lambda x: x[0])
-    parts: List[str] = []
-    patch_texts: List[str] = []
-    cursor = 0
-    for i, (s, e) in enumerate(chosen_spans):
-        parts.append(decode_tokens(source_tokenizer, source_input_ids[cursor:s]))
-        parts.append(f"<BUG_MASK_{i}>")
-        patch_texts.append(decode_tokens(source_tokenizer, source_input_ids[s:e]))
-        cursor = e
-    parts.append(decode_tokens(source_tokenizer, source_input_ids[cursor:]))
-
-    return "".join(parts), patch_texts, full_code_text
-
-
-def build_prompt(masked_code_text: str, n_patches: int, language: str = "java") -> str:
-    patch_spec = "\n".join(f"<PATCH_{i}>...replacement...</PATCH_{i}>" for i in range(n_patches))
-    return (
-        "You are a code repair assistant. The input code contains one or more masked bug regions.\n"
-        "Each masked region is marked as <BUG_MASK_i>. Return ONLY the missing replacements, in order,\n"
-        "using exactly the following format and nothing else:\n"
-        f"{patch_spec}\n\n"
-        "Do not return the full file. Do not explain anything.\n\n"
-        f"Language: {language}\n"
-        f"Masked code:\n```{language}\n{masked_code_text}\n```\n\n"
-        "Replacements:\n"
-    )
-
-
-def build_target_patch_block(patch_texts: List[str]) -> str:
-    return "\n".join(f"<PATCH_{i}>{txt}</PATCH_{i}>" for i, txt in enumerate(patch_texts))
-
-
-def parse_patch_block(text: str, expected_count: int) -> List[str]:
-    matches = PATCH_RE.findall(text)
-    found: Dict[int, str] = {}
-    for idx_str, body in matches:
-        idx = int(idx_str)
-        if idx not in found:
-            found[idx] = body
-    return [found.get(i, "") for i in range(expected_count)]
-
-
-def reconstruct_full_code(masked_code_text: str, predicted_patches: List[str]) -> str:
-    repaired = masked_code_text
-    for i, patch in enumerate(predicted_patches):
-        repaired = repaired.replace(f"<BUG_MASK_{i}>", patch)
-    return repaired
-
-
-def patch_minimality_ratio(pred_ids: List[int], gt_ids: List[int]) -> float:
-    if token_edit_distance is None:
-        return 0.0
-    denom = max(1, len(gt_ids))
-    return max(0.0, 1.0 - (token_edit_distance(pred_ids, gt_ids) / denom))
-
-
-class BaseRecordIndex:
-    def __init__(self, path: Path, max_records: Optional[int], max_source_seq_len: int):
-        self.path = path
-        self.offsets: List[int] = []
-        self.valid_masks: List[List[int]] = []
-        self.k_valid: List[int] = []
-        self.max_source_seq_len = int(max_source_seq_len)
-
-        with gzip.open(self.path, "rb") as f:
-            while True:
-                pos = f.tell()
-                line = f.readline()
-                if not line:
-                    break
-                if not line.strip():
-                    continue
-
-                try:
-                    ex = json.loads(line.decode("utf-8"))
-                except Exception:
-                    continue
-
-                input_ids = ex.get("input_ids", [])
-                spans = ex.get("hunk_token_spans", [])
-                if not isinstance(input_ids, list) or len(input_ids) == 0:
-                    continue
-
-                L = min(len(input_ids), self.max_source_seq_len)
-                filtered = _filter_spans(spans, L)
-                k = len(filtered)
-                if k < 2:
-                    continue
-
-                masks = all_valid_subset_masks(k, min_hunks=2)
-                if not masks:
-                    continue
-
-                self.offsets.append(pos)
-                self.valid_masks.append(masks)
-                self.k_valid.append(k)
-
-                if max_records is not None and len(self.offsets) >= max_records:
-                    break
-
-        if not self.offsets:
-            raise RuntimeError(f"No usable records found in {self.path}")
-
-    def __len__(self) -> int:
-        return len(self.offsets)
-
-    def read_record(self, idx: int) -> Dict[str, Any]:
-        with gzip.open(self.path, "rb") as f:
-            f.seek(self.offsets[idx])
-            line = f.readline().decode("utf-8")
-        ex = json.loads(line)
-        input_ids = ex["input_ids"][: self.max_source_seq_len]
-        spans = _filter_spans(ex["hunk_token_spans"], len(input_ids))
-        ex["input_ids"] = input_ids
-        ex["hunk_token_spans"] = spans
-        return ex
-
-
-def split_base_records(num_records: int, eval_ratio: float, seed: int) -> Tuple[List[int], List[int]]:
-    ids = list(range(num_records))
-    rng = random.Random(seed)
-    rng.shuffle(ids)
-    n_eval = max(1, int(round(num_records * eval_ratio)))
-    eval_ids = sorted(ids[:n_eval])
-    train_ids = sorted(ids[n_eval:])
-    return train_ids, eval_ids
-
-
-class ExpandedRepairDataset(Dataset):
-    def __init__(
-        self,
-        index: BaseRecordIndex,
-        source_tokenizer,
-        base_record_ids: List[int],
-        max_examples: Optional[int] = None,
-        language: str = "java",
-    ):
-        self.index = index
-        self.source_tokenizer = source_tokenizer
-        self.base_record_ids = list(base_record_ids)
-        self.language = language
-
-        self.prefix: List[int] = [0]
-        for rid in self.base_record_ids:
-            self.prefix.append(self.prefix[-1] + len(self.index.valid_masks[rid]))
-        self.total_examples = min(self.prefix[-1], int(max_examples)) if max_examples is not None else self.prefix[-1]
-
-    def __len__(self) -> int:
-        return self.total_examples
-
-    def _locate(self, global_idx: int) -> Tuple[int, int]:
-        if global_idx < 0 or global_idx >= len(self):
-            raise IndexError(global_idx)
-        r = bisect.bisect_right(self.prefix, global_idx) - 1
-        local = global_idx - self.prefix[r]
-        base_id = self.base_record_ids[r]
-        subset_mask = self.index.valid_masks[base_id][local]
-        return base_id, subset_mask
-
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        base_id, subset_mask = self._locate(idx)
-        rec = self.index.read_record(base_id)
-        input_ids: List[int] = rec["input_ids"]
-        spans: List[Tuple[int, int]] = rec["hunk_token_spans"]
-
-        chosen_spans = [spans[i] for i in range(len(spans)) if (subset_mask >> i) & 1]
-        masked_code_text, patch_texts, full_code_text = build_masked_code_and_targets(
-            self.source_tokenizer,
-            input_ids,
-            chosen_spans,
-        )
-        prompt = build_prompt(masked_code_text, len(patch_texts), language=self.language)
-        target = build_target_patch_block(patch_texts)
-
-        return {
-            "base_record_id": base_id,
-            "subset_mask": subset_mask,
-            "prompt": prompt,
-            "target": target,
-            "masked_code_text": masked_code_text,
-            "gold_patch_texts": patch_texts,
-            "gold_full_code": full_code_text,
-            "num_hunks": len(patch_texts),
-        }
-
+# ============================================================
+# DATA LOADING
+# ============================================================
 
 @dataclass
-class ARRepairCollator:
-    tokenizer: Any
-    max_seq_len: int
-
-    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        input_id_tensors = []
-        attn_tensors = []
-        label_tensors = []
-        meta = []
-
-        for ex in batch:
-            prompt_ids = self.tokenizer(
-                ex["prompt"],
-                add_special_tokens=False,
-                truncation=True,
-                max_length=self.max_seq_len,
-            )["input_ids"]
-            target_ids = self.tokenizer(
-                ex["target"],
-                add_special_tokens=False,
-                truncation=True,
-                max_length=self.max_seq_len,
-            )["input_ids"]
-
-            eos = [] if self.tokenizer.eos_token_id is None else [self.tokenizer.eos_token_id]
-            merged = (prompt_ids + target_ids + eos)[: self.max_seq_len]
-
-            labels = [-100] * min(len(prompt_ids), len(merged))
-            labels.extend(merged[len(labels):])
-            labels = labels[: len(merged)]
-
-            ids = torch.tensor(merged, dtype=torch.long)
-            input_id_tensors.append(ids)
-            attn_tensors.append(torch.ones_like(ids))
-            label_tensors.append(torch.tensor(labels, dtype=torch.long))
-            meta.append(ex)
-
-        max_len = max(x.size(0) for x in input_id_tensors)
-        pad_id = self.tokenizer.pad_token_id
-
-        def pad_1d(x: torch.Tensor, pad_val: int) -> torch.Tensor:
-            if x.size(0) == max_len:
-                return x
-            pad = torch.full((max_len - x.size(0),), pad_val, dtype=x.dtype)
-            return torch.cat([x, pad], dim=0)
-
-        return {
-            "input_ids": torch.stack([pad_1d(x, pad_id) for x in input_id_tensors], dim=0),
-            "attention_mask": torch.stack([pad_1d(x, 0) for x in attn_tensors], dim=0),
-            "labels": torch.stack([pad_1d(x, -100) for x in label_tensors], dim=0),
-            "meta": meta,
-        }
+class Record:
+    idx: int
+    input_ids: List[int]
+    hunk_spans: List[Tuple[int, int]]
 
 
-class MetaIgnoringTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        inputs = dict(inputs)
-        inputs.pop("meta", None)
-        outputs = model(**inputs)
-        loss = outputs.loss
-        return (loss, outputs) if return_outputs else loss
-
-
-def evaluate_model(
-    model,
-    baseline_tokenizer,
+def load_records(
+    data_gz: Path,
     source_tokenizer,
-    eval_ds: ExpandedRepairDataset,
-    device: torch.device,
-    max_new_tokens: int,
-    num_beams: int,
-    num_return_sequences: int,
-    codebleu_lang: str = "java",
-) -> Dict[str, Any]:
-    model.eval()
+    max_records: Optional[int],
+    max_seq_len: int,
+    min_hunks: int = 2,
+) -> List[Record]:
+    """
+    Load records with at least `min_hunks` valid spans.
+    Mirrors filtering in model.py / inference.py.
+    """
+    records: List[Record] = []
+    with gzip.open(data_gz, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ex = json.loads(line)
+            except Exception:
+                continue
 
-    agg = MetricsAggregator() if MetricsAggregator is not None else None
-    total_samples = 0
-    total_hunks = 0
-    pass_at_k_hits = 0
-    patch_minimality_values = []
-    gen_tokens = 0
-    gen_time_sec = 0.0
+            ids   = ex.get("input_ids", [])
+            spans = ex.get("hunk_token_spans", [])
+            if not ids or not spans:
+                continue
 
-    for i in range(len(eval_ds)):
-        ex = eval_ds[i]
-        enc = baseline_tokenizer(
-            ex["prompt"],
-            return_tensors="pt",
-            truncation=True,
-            max_length=getattr(model.config, "max_position_embeddings", DEFAULT_FALLBACK_MAX_LEN),
+            ids      = ids[:max_seq_len]
+            filtered = _filter_spans(spans, len(ids))
+            if len(filtered) < min_hunks:
+                continue
+
+            records.append(Record(idx=len(records), input_ids=ids, hunk_spans=filtered))
+            if max_records is not None and len(records) >= max_records:
+                break
+
+    if not records:
+        raise RuntimeError(f"No records with >= {min_hunks} hunks found in {data_gz}")
+    return records
+
+
+# ============================================================
+# STRATEGY A: FIM CHAINING
+# ============================================================
+
+class FIMBaseline:
+    """
+    Fill-in-the-Middle chaining baseline.
+
+    For each hunk i in left-to-right order:
+      1. Build FIM prompt:
+             <prefix_tok> code_up_to_hunk <suffix_tok> code_after_hunk <middle_tok>
+         where 'code_up_to_hunk' already includes predictions for hunks 0..i-1.
+      2. Greedily decode the middle.
+      3. Update the working token sequence before moving to hunk i+1.
+
+    This setup is architecturally equivalent to MDLM infilling: the model
+    sees the full prefix AND suffix context for every hunk.  The only
+    difference is AR generation vs masked diffusion.
+    """
+
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        preset: Dict[str, Any],
+        device: torch.device,
+        max_new_tokens: int = 256,
+        source_tokenizer=None,
+    ):
+        self.model            = model
+        self.tokenizer        = tokenizer
+        self.preset           = preset
+        self.device           = device
+        self.max_new_tokens   = max_new_tokens
+        self.source_tokenizer = source_tokenizer
+
+        for role in ("prefix", "suffix", "middle"):
+            tok_str = preset[role]
+            tok_id  = tokenizer.convert_tokens_to_ids(tok_str)
+            if tok_id == tokenizer.unk_token_id:
+                print(f"[WARN] FIM token '{tok_str}' not in vocab -- FIM quality may degrade.")
+
+    @torch.no_grad()
+    def _fill_one(self, prefix_text: str, suffix_text: str) -> str:
+        """Single greedy FIM call; returns generated middle text."""
+        fim_input = (
+            self.preset["prefix"] + prefix_text
+            + self.preset["suffix"] + suffix_text
+            + self.preset["middle"]
         )
-        enc = {k: v.to(device) for k, v in enc.items()}
+        enc = self.tokenizer(
+            fim_input, return_tensors="pt",
+            truncation=True, max_length=DEFAULT_MAX_LEN,
+        ).to(self.device)
 
-        start = time.perf_counter()
-        with torch.no_grad():
-            out = model.generate(
-                **enc,
-                max_new_tokens=max_new_tokens,
-                do_sample=(num_return_sequences > 1),
-                temperature=0.8 if num_return_sequences > 1 else None,
-                top_p=0.95 if num_return_sequences > 1 else None,
-                num_beams=num_beams if num_return_sequences == 1 else 1,
-                num_return_sequences=num_return_sequences,
-                pad_token_id=baseline_tokenizer.pad_token_id,
-                eos_token_id=baseline_tokenizer.eos_token_id,
+        out = self.model.generate(
+            **enc,
+            max_new_tokens=self.max_new_tokens,
+            do_sample=False,
+            pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+        gen = out[0][enc["input_ids"].size(1):]
+        return self.tokenizer.decode(gen, skip_special_tokens=True)
+
+    def run(self, record: Record, num_samples: int = 1) -> List[List[str]]:
+        """
+        Returns `num_samples` candidate patch lists.
+        Sample 0 is always greedy; samples 1+ use temperature=0.8.
+        """
+        src_tok     = self.source_tokenizer
+        all_samples: List[List[str]] = []
+
+        for sample_i in range(num_samples):
+            current_ids = list(record.input_ids)
+            spans       = list(record.hunk_spans)
+            patches: List[str] = []
+
+            for hi, (s, e) in enumerate(spans):
+                prefix_text = decode_ids(src_tok, current_ids[:s])
+                suffix_text = decode_ids(src_tok, current_ids[e:])
+
+                if sample_i == 0:
+                    filled = self._fill_one(prefix_text, suffix_text)
+                else:
+                    fim_input = (
+                        self.preset["prefix"] + prefix_text
+                        + self.preset["suffix"] + suffix_text
+                        + self.preset["middle"]
+                    )
+                    enc = self.tokenizer(
+                        fim_input, return_tensors="pt",
+                        truncation=True, max_length=DEFAULT_MAX_LEN,
+                    ).to(self.device)
+                    with torch.no_grad():
+                        out = self.model.generate(
+                            **enc,
+                            max_new_tokens=self.max_new_tokens,
+                            do_sample=True, temperature=0.8, top_p=0.95,
+                            pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                            eos_token_id=self.tokenizer.eos_token_id,
+                        )
+                    filled = self.tokenizer.decode(
+                        out[0][enc["input_ids"].size(1):], skip_special_tokens=True
+                    )
+
+                patches.append(filled)
+
+                # Update current_ids and re-map downstream span offsets
+                filled_ids  = src_tok(filled, add_special_tokens=False)["input_ids"]
+                delta       = len(filled_ids) - (e - s)
+                current_ids = current_ids[:s] + filled_ids + current_ids[e:]
+                spans = [
+                    (a, b) if j <= hi else (a + delta, b + delta)
+                    for j, (a, b) in enumerate(spans)
+                ]
+
+            all_samples.append(patches)
+
+        return all_samples
+
+
+# ============================================================
+# STRATEGY B: INSTRUCT ZERO-SHOT
+# ============================================================
+
+class InstructBaseline:
+    """
+    Zero-shot instruct baseline.
+
+    One prompt presents all masked regions simultaneously; the model returns
+    PATCH_i: <text> lines.  No fine-tuning.  This is the minimal AR baseline:
+    it shows what a capable code-repair LLM can do without any task-specific
+    training, and without the benefit of suffix context per hunk.
+    """
+
+    SYSTEM_PROMPT = (
+        "You are a code repair assistant. "
+        "Return ONLY the replacement lines in the exact format requested. "
+        "Do not explain anything. Do not output the full file."
+    )
+
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        model_name: str,
+        device: torch.device,
+        max_new_tokens: int = 256,
+        source_tokenizer=None,
+    ):
+        self.model            = model
+        self.tokenizer        = tokenizer
+        self.model_name       = model_name
+        self.device           = device
+        self.max_new_tokens   = max_new_tokens
+        self.source_tokenizer = source_tokenizer
+
+    def _build_prompt(self, masked_code: str, n_hunks: int, language: str) -> str:
+        patch_spec = "\n".join(f"PATCH_{i}: <replacement_{i}>" for i in range(n_hunks))
+        return (
+            "The following code contains masked regions.\n"
+            "Each masked region is marked with <MASK_i>.\n"
+            "Return ONLY replacements in this exact format:\n\n"
+            f"{patch_spec}\n\n"
+            "Rules:\n"
+            "1. Do not output the full file.\n"
+            "2. One PATCH_i line per mask, in order.\n\n"
+            f"Language: {language}\n"
+            f"Code:\n```{language}\n{masked_code}\n```\n\n"
+            "Replacements:\n"
+        )
+
+    def _apply_chat_template(self, raw_prompt: str) -> str:
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            messages = [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user",   "content": raw_prompt},
+            ]
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
             )
-        gen_time_sec += time.perf_counter() - start
+        return raw_prompt
 
-        input_len = enc["input_ids"].size(1)
-        ref_full_ids = source_tokenizer(ex["gold_full_code"], add_special_tokens=False)["input_ids"]
+    def mask_code(self, record: Record) -> Tuple[str, List[str]]:
+        """Returns (masked_code_str, gold_patch_texts)."""
+        ids, spans = record.input_ids, record.hunk_spans
+        parts: List[str] = []
+        gold:  List[str] = []
+        cursor = 0
+        for i, (s, e) in enumerate(spans):
+            parts.append(decode_ids(self.source_tokenizer, ids[cursor:s]))
+            parts.append(f"<MASK_{i}>")
+            gold.append(decode_ids(self.source_tokenizer, ids[s:e]))
+            cursor = e
+        parts.append(decode_ids(self.source_tokenizer, ids[cursor:]))
+        return "".join(parts), gold
 
-        exact_hit = False
-        best_metrics = None
-        best_exact = -1.0
+    @staticmethod
+    def _parse_patches(text: str, n_hunks: int) -> List[str]:
+        found: Dict[int, str] = {}
+        for line in text.splitlines():
+            m = PATCH_LINE_RE.match(line)
+            if m:
+                idx = int(m.group(1))
+                if 0 <= idx < n_hunks and idx not in found:
+                    found[idx] = m.group(2)
+        return [found.get(i, "") for i in range(n_hunks)]
 
+    @torch.no_grad()
+    def run(
+        self,
+        record: Record,
+        num_samples: int = 1,
+        temperature: float = 0.8,
+        language: str = "java",
+    ) -> Tuple[List[List[str]], List[str]]:
+        """Returns (list_of_patch_lists, gold_patch_texts)."""
+        masked_code, gold = self.mask_code(record)
+        raw_prompt        = self._build_prompt(masked_code, len(record.hunk_spans), language)
+        prompt            = self._apply_chat_template(raw_prompt)
+
+        enc = self.tokenizer(
+            prompt, return_tensors="pt",
+            truncation=True, max_length=DEFAULT_MAX_LEN,
+        ).to(self.device)
+
+        do_sample = (num_samples > 1)
+        out = self.model.generate(
+            **enc,
+            max_new_tokens=self.max_new_tokens,
+            do_sample=do_sample,
+            temperature=temperature if do_sample else None,
+            top_p=0.95 if do_sample else None,
+            num_return_sequences=num_samples,
+            pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+
+        input_len   = enc["input_ids"].size(1)
+        all_samples = []
         for seq in out:
-            gen_part = seq[input_len:]
-            gen_tokens += int(gen_part.numel())
-            text = baseline_tokenizer.decode(gen_part, skip_special_tokens=True)
-            patches = parse_patch_block(text, ex["num_hunks"])
-            pred_full_code = reconstruct_full_code(ex["masked_code_text"], patches)
-            pred_full_ids = source_tokenizer(pred_full_code, add_special_tokens=False)["input_ids"]
+            gen_text = self.tokenizer.decode(seq[input_len:], skip_special_tokens=True)
+            all_samples.append(self._parse_patches(gen_text, len(record.hunk_spans)))
 
-            if pred_full_ids == ref_full_ids:
-                exact_hit = True
+        return all_samples, gold
 
-            em = 1.0 if pred_full_ids == ref_full_ids else 0.0
-            if token_exact_match_rate is not None and len(pred_full_ids) == len(ref_full_ids):
-                em = token_exact_match_rate(pred_full_ids, ref_full_ids)
 
-            per_hunk_exact = []
-            for pred_patch_text, gold_patch_text in zip(patches, ex["gold_patch_texts"]):
-                pred_patch_ids = source_tokenizer(pred_patch_text, add_special_tokens=False)["input_ids"]
-                gold_patch_ids = source_tokenizer(gold_patch_text, add_special_tokens=False)["input_ids"]
-                per_hunk_exact.append(pred_patch_ids == gold_patch_ids)
-                patch_minimality_values.append(patch_minimality_ratio(pred_patch_ids, gold_patch_ids))
+# ============================================================
+# SHARED EVALUATION LOOP
+# ============================================================
 
-            record = {
-                "token_exact_match": em,
-                "per_hunk_exact": per_hunk_exact,
-                "all_hunks_correct": all(per_hunk_exact) if per_hunk_exact else True,
-                "edit_distance": token_edit_distance(pred_full_ids, ref_full_ids) if token_edit_distance is not None else None,
-                "codebleu": compute_codebleu(pred_full_code, ex["gold_full_code"], language=codebleu_lang).get("codebleu") if compute_codebleu is not None else None,
-                "training_samples_generated": 1,
+def _evaluate(
+    strategy: str,
+    baseline,
+    records: List[Record],
+    source_tokenizer,
+    num_samples: int,
+    k: int,
+    temperature: float,
+    codebleu_lang: str,
+    verbose_every: int = 50,
+) -> Dict[str, Any]:
+    """
+    Unified evaluation loop for both FIM and instruct strategies.
+
+    For each record, `num_samples` patch candidates are generated.
+    The best candidate (by patch_string_em) contributes to the aggregator.
+    pass@k is computed with the unbiased Codex estimator from evaluation.py.
+    """
+    agg = MetricsAggregator()
+    pass_at_k_per_record: List[float] = []
+    gen_tokens = 0
+    gen_time   = 0.0
+
+    for i, record in enumerate(records):
+        gold_full = decode_ids(source_tokenizer, record.input_ids)
+
+        t0 = time.perf_counter()
+        if strategy == "fim":
+            candidate_lists = baseline.run(record, num_samples=num_samples)
+            gold_patches    = [
+                decode_ids(source_tokenizer, record.input_ids[s:e])
+                for s, e in record.hunk_spans
+            ]
+        else:
+            candidate_lists, gold_patches = baseline.run(
+                record,
+                num_samples=num_samples,
+                temperature=temperature,
+                language=codebleu_lang,
+            )
+        gen_time += time.perf_counter() - t0
+
+        gold_patch_ids = [
+            source_tokenizer(g, add_special_tokens=False)["input_ids"]
+            for g in gold_patches
+        ]
+
+        correct_count = 0
+        best_metrics  = None
+        best_score    = -1.0
+
+        for patches in candidate_lists:
+            # Reconstruct full file from patch predictions
+            if strategy == "fim":
+                current_ids = list(record.input_ids)
+                spans       = list(record.hunk_spans)
+                for hi, (s, e) in enumerate(spans):
+                    filled_ids  = source_tokenizer(patches[hi], add_special_tokens=False)["input_ids"]
+                    delta       = len(filled_ids) - (e - s)
+                    current_ids = current_ids[:s] + filled_ids + current_ids[e:]
+                    spans = [
+                        (a, b) if j <= hi else (a + delta, b + delta)
+                        for j, (a, b) in enumerate(spans)
+                    ]
+                pred_full = decode_ids(source_tokenizer, current_ids)
+            else:
+                masked_code, _ = baseline.mask_code(record)
+                pred_full = masked_code
+                for hi, patch in enumerate(patches):
+                    pred_full = pred_full.replace(f"<MASK_{hi}>", patch)
+
+            if pred_full.strip() == gold_full.strip():
+                correct_count += 1
+
+            # Per-hunk metrics
+            per_hunk_em: List[bool]  = []
+            hunk_bleu:   List[float] = []
+            hunk_ned:    List[float] = []
+            hunk_str_em: List[float] = []
+
+            for pred_patch, gold_patch, gold_ids in zip(patches, gold_patches, gold_patch_ids):
+                pred_ids    = source_tokenizer(pred_patch, add_special_tokens=False)["input_ids"]
+                gen_tokens += len(pred_ids)
+                is_em       = patch_string_exact_match(pred_patch, gold_patch)
+                per_hunk_em.append(is_em)
+                hunk_str_em.append(float(is_em))
+                hunk_bleu.append(patch_bleu(pred_patch, gold_patch))
+                hunk_ned.append(normalized_edit_distance(pred_ids, gold_ids))
+
+            cb    = compute_codebleu(pred_full, gold_full, language=codebleu_lang)
+            score = sum(hunk_str_em) / max(len(hunk_str_em), 1)
+
+            rec_metrics = {
+                "per_hunk_exact":    per_hunk_em,
+                "all_hunks_correct": all_hunks_correct(per_hunk_em),
+                "patch_string_em":   score,
+                "patch_bleu":        sum(hunk_bleu) / max(len(hunk_bleu), 1),
+                "patch_ned":         sum(hunk_ned)  / max(len(hunk_ned),  1),
+                "codebleu":          cb.get("codebleu") if cb else None,
             }
+            if score > best_score:
+                best_score   = score
+                best_metrics = rec_metrics
 
-            if record["token_exact_match"] > best_exact:
-                best_exact = record["token_exact_match"]
-                best_metrics = record
-
-        pass_at_k_hits += int(exact_hit)
-        if agg is not None and best_metrics is not None:
+        pass_at_k_per_record.append(pass_at_k_unbiased(num_samples, correct_count, k))
+        if best_metrics is not None:
             agg.add(best_metrics)
 
-        total_samples += 1
-        total_hunks += ex["num_hunks"]
+        if (i + 1) % verbose_every == 0:
+            print(f"[EVAL] {i + 1}/{len(records)} records done")
 
-        if (i + 1) % 50 == 0:
-            print(f"[EVAL] done {i + 1}/{len(eval_ds)}")
-
-    summary = agg.summary() if agg is not None else {"num_records": total_samples}
+    summary = agg.summary()
     summary.update({
-        "pass@k": pass_at_k_hits / max(1, total_samples),
-        "localization_accuracy": 1.0,
-        "patch_minimality": sum(patch_minimality_values) / max(1, len(patch_minimality_values)),
-        "generation_efficiency": {
-            "avg_generated_tokens_per_sample": gen_tokens / max(1, total_samples),
-            "avg_decode_seconds_per_sample": gen_time_sec / max(1, total_samples),
-            "tokens_per_second": gen_tokens / max(1e-8, gen_time_sec),
-        },
-        "num_eval_samples": total_samples,
-        "num_eval_hunks": total_hunks,
-        "num_return_sequences": num_return_sequences,
+        "pass_at_k":                 sum(pass_at_k_per_record) / max(len(pass_at_k_per_record), 1),
+        "k":                         k,
+        "num_samples":               num_samples,
+        "avg_gen_tokens_per_record": gen_tokens / max(len(records), 1),
+        "avg_decode_sec_per_record": gen_time   / max(len(records), 1),
+        "tokens_per_second":         gen_tokens / max(gen_time, 1e-8),
     })
     return summary
 
 
-def resolve_model_name(baseline: str, explicit_model_name: Optional[str]) -> str:
-    if explicit_model_name:
-        return explicit_model_name
-    if baseline not in BASELINE_PRESETS:
-        raise ValueError(f"Unknown baseline '{baseline}'. Choices: {sorted(BASELINE_PRESETS)}")
-    return BASELINE_PRESETS[baseline]
-
-
-def pick_lora_targets(model_name: str) -> List[str]:
-    name = model_name.lower()
-    if "starcoder" in name:
-        return ["c_attn", "c_proj", "c_fc"]
-    return ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
-
+# ============================================================
+# MAIN
+# ============================================================
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train and evaluate AR reconstruction baselines on multi-hunk repair data")
-    parser.add_argument("--baseline", type=str, default="qwen", choices=sorted(BASELINE_PRESETS))
-    parser.add_argument("--model-name", type=str, default=None, help="Optional explicit HF model name; overrides --baseline preset")
-    parser.add_argument("--train-gz", type=str, default=str(DEFAULT_TRAIN_GZ))
+    parser = argparse.ArgumentParser(
+        description="Zero-shot FIM / instruct baselines for multi-hunk infilling"
+    )
+    parser.add_argument(
+        "--strategy", choices=["fim", "instruct"], default="fim",
+        help=(
+            "fim      = FIM-chaining with a native FIM model "
+            "(deepseek-coder / starcoder2 / codellama).  "
+            "instruct = zero-shot prompting of a chat model "
+            "(qwen / deepseek-instruct)."
+        ),
+    )
+    parser.add_argument(
+        "--baseline", type=str, default=None,
+        help=(
+            "Named preset.  "
+            "FIM presets: " + ", ".join(FIM_PRESETS) + ".  "
+            "Instruct presets: " + ", ".join(INSTRUCT_PRESETS) + ".  "
+            "Default: deepseek-coder (fim), qwen (instruct)."
+        ),
+    )
+    parser.add_argument("--model-name", type=str, default=None,
+                        help="Explicit HF model ID; overrides --baseline preset.")
+    parser.add_argument("--data-gz",          type=str, default=str(DEFAULT_DATA_GZ))
     parser.add_argument("--source-tokenizer", type=str, default=SOURCE_TOKENIZER_NAME)
-    parser.add_argument("--out-dir", type=str, default=None)
-    parser.add_argument("--max-records", type=int, default=None)
-    parser.add_argument("--eval-ratio", type=float, default=0.1)
-    parser.add_argument("--max-source-seq-len", type=int, default=4096)
-    parser.add_argument("--max-model-seq-len", type=int, default=None)
-    parser.add_argument("--max-train-examples", type=int, default=None)
-    parser.add_argument("--max-eval-examples", type=int, default=None)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
-    parser.add_argument("--num-train-epochs", type=int, default=1)
-    parser.add_argument("--learning-rate", type=float, default=2e-4)
-    parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--warmup-ratio", type=float, default=0.03)
-    parser.add_argument("--logging-steps", type=int, default=10)
-    parser.add_argument("--save-steps", type=int, default=200)
-    parser.add_argument("--save-total-limit", type=int, default=2)
-    parser.add_argument("--lora-r", type=int, default=16)
-    parser.add_argument("--lora-alpha", type=int, default=32)
-    parser.add_argument("--lora-dropout", type=float, default=0.05)
-    parser.add_argument("--use-bf16", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--max-new-tokens", type=int, default=512)
-    parser.add_argument("--num-beams", type=int, default=1)
-    parser.add_argument("--num-return-sequences", type=int, default=1)
-    parser.add_argument("--language", type=str, default="java")
-    args, _ = parser.parse_known_args()
+    parser.add_argument("--out-dir",          type=str, default=str(DEFAULT_OUT_DIR))
+    parser.add_argument("--max-records",      type=int, default=None,
+                        help="Cap number of records loaded (for quick tests).")
+    parser.add_argument("--max-seq-len",      type=int, default=4096)
+    parser.add_argument("--max-new-tokens",   type=int, default=256)
+    parser.add_argument("--num-samples",      type=int, default=1,
+                        help="Samples per record for unbiased pass@k estimation.")
+    parser.add_argument("--k",                type=int, default=1,
+                        help="k in pass@k.")
+    parser.add_argument("--temperature",      type=float, default=0.8,
+                        help="Sampling temperature (used when num-samples > 1).")
+    parser.add_argument("--language",         type=str, default="java")
+    parser.add_argument("--use-bf16",         action="store_true")
+    parser.add_argument("--dry-run",          action="store_true",
+                        help="Print first prompt/response then exit.")
+    args = parser.parse_args()
 
     set_seed(RANDOM_SEED)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model_name = resolve_model_name(args.baseline, args.model_name)
-    out_dir = Path(args.out_dir) if args.out_dir else (DEFAULT_OUT_DIR / f"ar_{args.baseline}")
-
-    print(f"[INFO] baseline={args.baseline} model_name={model_name}")
-    print(f"[INFO] Loading source tokenizer: {args.source_tokenizer}")
-    source_tok = AutoTokenizer.from_pretrained(args.source_tokenizer, trust_remote_code=True, use_fast=True)
-
-    print(f"[INFO] Loading baseline tokenizer: {model_name}")
-    baseline_tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=True)
-    if baseline_tok.pad_token_id is None:
-        if baseline_tok.eos_token_id is None:
-            raise RuntimeError("Baseline tokenizer has neither pad nor eos token.")
-        baseline_tok.pad_token = baseline_tok.eos_token
-
+    device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bf16_ok = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    dtype = torch.bfloat16 if (args.use_bf16 and bf16_ok) else torch.float32
+    dtype   = torch.bfloat16 if (args.use_bf16 and bf16_ok) else torch.float32
 
-    print(f"[INFO] Loading model: {model_name}")
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, trust_remote_code=True)
-    model.to(device)
+    # ---- Resolve model ----
+    if args.strategy == "fim":
+        preset_name = args.baseline or "deepseek-coder"
+        if preset_name not in FIM_PRESETS:
+            raise ValueError(
+                f"Unknown FIM baseline '{preset_name}'. Choices: {sorted(FIM_PRESETS)}"
+            )
+        preset   = FIM_PRESETS[preset_name]
+        model_id = args.model_name or preset["model"]
+    else:
+        preset_name = args.baseline or "qwen"
+        if preset_name not in INSTRUCT_PRESETS:
+            raise ValueError(
+                f"Unknown instruct baseline '{preset_name}'. Choices: {sorted(INSTRUCT_PRESETS)}"
+            )
+        preset   = None
+        model_id = args.model_name or INSTRUCT_PRESETS[preset_name]
 
-    max_model_seq_len = args.max_model_seq_len or get_model_max_len(model)
-    print(f"[INFO] max_model_seq_len={max_model_seq_len}")
+    out_dir = Path(args.out_dir) / f"{args.strategy}_{preset_name}"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    index = BaseRecordIndex(Path(args.train_gz), args.max_records, args.max_source_seq_len)
-    train_ids, eval_ids = split_base_records(len(index), eval_ratio=args.eval_ratio, seed=RANDOM_SEED)
-
-    train_ds = ExpandedRepairDataset(index, source_tok, train_ids, args.max_train_examples, args.language)
-    eval_ds = ExpandedRepairDataset(index, source_tok, eval_ids, args.max_eval_examples, args.language)
-
-    print(f"[INFO] Base train records: {len(train_ids):,}")
-    print(f"[INFO] Base eval records: {len(eval_ids):,}")
-    print(f"[INFO] Expanded train examples: {len(train_ds):,}")
-    print(f"[INFO] Expanded eval examples: {len(eval_ds):,}")
-
-    collator = ARRepairCollator(tokenizer=baseline_tok, max_seq_len=max_model_seq_len)
-
-    if args.dry_run:
-        ex = train_ds[0]
-        batch = collator([ex])
-        print("[DRY-RUN] prompt snippet:\n", ex["prompt"][:800])
-        print("[DRY-RUN] target:\n", ex["target"])
-        for k, v in batch.items():
-            if k != "meta":
-                print(f"[DRY-RUN] {k}: shape={tuple(v.shape)} dtype={v.dtype}")
-        return
-
-    if not args.eval_only:
-        lora_cfg = LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-            target_modules=pick_lora_targets(model_name),
-        )
-        model = get_peft_model(model, lora_cfg)
-        model.print_trainable_parameters()
-
-        try:
-            model.gradient_checkpointing_enable()
-            print("[INFO] Gradient checkpointing enabled")
-        except Exception:
-            print("[WARN] Could not enable gradient checkpointing")
-
-        train_args = TrainingArguments(
-            output_dir=str(out_dir),
-            per_device_train_batch_size=args.per_device_train_batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
-            warmup_ratio=args.warmup_ratio,
-            num_train_epochs=args.num_train_epochs,
-            logging_steps=args.logging_steps,
-            save_steps=args.save_steps,
-            save_total_limit=args.save_total_limit,
-            bf16=bool(args.use_bf16 and bf16_ok),
-            fp16=False,
-            report_to="none",
-            dataloader_num_workers=0,
-            remove_unused_columns=False,
-            optim="adamw_torch",
-        )
-
-        trainer = MetaIgnoringTrainer(
-            model=model,
-            args=train_args,
-            train_dataset=train_ds,
-            data_collator=collator,
-            tokenizer=baseline_tok,
-        )
-
-        print("[INFO] Starting AR baseline training...")
-        trainer.train()
-
-        adapter_dir = out_dir / "lora_adapter"
-        print(f"[INFO] Saving final AR baseline adapter to {adapter_dir}")
-        trainer.save_model(str(adapter_dir))
-
-    print("[INFO] Starting evaluation...")
-    summary = evaluate_model(
-        model=model,
-        baseline_tokenizer=baseline_tok,
-        source_tokenizer=source_tok,
-        eval_ds=eval_ds,
-        device=device,
-        max_new_tokens=args.max_new_tokens,
-        num_beams=args.num_beams,
-        num_return_sequences=args.num_return_sequences,
-        codebleu_lang=args.language,
+    # ---- Tokenizers ----
+    print(f"[INFO] Source tokenizer : {args.source_tokenizer}")
+    source_tok = AutoTokenizer.from_pretrained(
+        args.source_tokenizer, trust_remote_code=True, use_fast=True
     )
 
-    summary.update({
-        "baseline": args.baseline,
-        "model_name": model_name,
-    })
+    print(f"[INFO] Model tokenizer  : {model_id}")
+    tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, use_fast=True)
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
 
-    print("[RESULT] Evaluation summary:")
-    print(json.dumps(summary, indent=2))
+    # ---- Model ----
+    print(f"[INFO] Loading model    : {model_id}  dtype={dtype}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, torch_dtype=dtype, trust_remote_code=True
+    )
+    model.to(device).eval()
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "eval_summary.json"
-    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(f"[INFO] Wrote eval summary to {out_path}")
+    # ---- Data ----
+    print(f"[INFO] Loading records from {args.data_gz}")
+    records = load_records(
+        Path(args.data_gz), source_tok,
+        max_records=args.max_records,
+        max_seq_len=args.max_seq_len,
+    )
+    print(f"[INFO] {len(records)} records loaded  (>= 2 hunks each)")
+
+    # ---- Baseline object ----
+    if args.strategy == "fim":
+        baseline = FIMBaseline(
+            model=model, tokenizer=tok, preset=preset,
+            device=device, max_new_tokens=args.max_new_tokens,
+            source_tokenizer=source_tok,
+        )
+    else:
+        baseline = InstructBaseline(
+            model=model, tokenizer=tok, model_name=model_id,
+            device=device, max_new_tokens=args.max_new_tokens,
+            source_tokenizer=source_tok,
+        )
+
+    # ---- Dry-run ----
+    if args.dry_run:
+        rec = records[0]
+        print(f"\n[DRY-RUN] record 0: {len(rec.input_ids)} tokens, "
+              f"{len(rec.hunk_spans)} hunks: {rec.hunk_spans}")
+        if args.strategy == "fim":
+            gold_patches = [decode_ids(source_tok, rec.input_ids[s:e]) for s, e in rec.hunk_spans]
+            prefix_text  = decode_ids(source_tok, rec.input_ids[:rec.hunk_spans[0][0]])
+            suffix_text  = decode_ids(source_tok, rec.input_ids[rec.hunk_spans[0][1]:])
+            print(f"\nFIM prompt hunk-0 prefix (first 300 chars):\n{prefix_text[:300]!r}")
+            print(f"FIM prompt hunk-0 suffix (last  300 chars):\n{suffix_text[-300:]!r}")
+            patches = baseline.run(rec, num_samples=1)[0]
+        else:
+            masked_code, gold_patches = baseline.mask_code(rec)
+            prompt = baseline._build_prompt(masked_code, len(rec.hunk_spans), args.language)
+            print(f"\nInstruct prompt (first 2000 chars):\n{prompt[:2000]}")
+            samples, gold_patches = baseline.run(rec, num_samples=1, language=args.language)
+            patches = samples[0]
+        print(f"\nPredicted patches : {patches}")
+        print(f"Gold patches      : {gold_patches}")
+        return
+
+    # ---- Evaluate ----
+    print(f"\n[INFO] strategy={args.strategy}  model={model_id}  "
+          f"num_samples={args.num_samples}  k={args.k}")
+
+    summary = _evaluate(
+        strategy=args.strategy,
+        baseline=baseline,
+        records=records,
+        source_tokenizer=source_tok,
+        num_samples=args.num_samples,
+        k=args.k,
+        temperature=args.temperature,
+        codebleu_lang=args.language,
+    )
+    summary["model"]    = model_id
+    summary["strategy"] = args.strategy
+
+    print("\n" + "=" * 60)
+    print("EVALUATION SUMMARY")
+    print("=" * 60)
+    for key, val in summary.items():
+        if isinstance(val, float):
+            print(f"  {key:45s}: {val:.4f}")
+        else:
+            print(f"  {key:45s}: {val}")
+
+    results_path = out_dir / "eval_summary.json"
+    with open(results_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"\n[INFO] Results saved to {results_path}")
 
 
 if __name__ == "__main__":
