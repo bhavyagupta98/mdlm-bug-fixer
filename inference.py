@@ -19,12 +19,15 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
-from eval_metrics import (
+from evaluation import (
     token_exact_match_rate,
     per_hunk_exact_match,
     all_hunks_correct,
     masked_cross_entropy,
     token_edit_distance,
+    normalized_edit_distance,
+    patch_bleu,
+    patch_string_exact_match,
     top_k_accuracy,
     compute_codebleu,
     MetricsAggregator,
@@ -244,6 +247,11 @@ def load_model_and_tokenizer(
         model = PeftModel.from_pretrained(model, adapter_path)
         print("[INFO] Merging LoRA weights into base model...")
         model = model.merge_and_unload()
+    elif adapter_path:
+        print(f"[INFO] Adapter path provided but not found: {adapter_path}")
+        print("[INFO] Continuing with base model only (no LoRA adapter merged).")
+    else:
+        print("[INFO] --no-adapter enabled: running base model only (no LoRA adapter).")
 
     if device == "cuda" and torch.cuda.is_available():
         model = model.cuda()
@@ -342,6 +350,55 @@ def prepare_masked_input(
     return masked, gt, mask_pos, spans, mask_token_id
 
 
+def compute_holistic_patch_metrics(
+    tokenizer: AutoTokenizer,
+    pred_list: List[int],
+    gt_list: List[int],
+    spans: List[Tuple[int, int]],
+) -> Dict[str, Any]:
+    """
+    Compute patch-level holistic metrics aligned with baseline_reconstruction_eval.py.
+
+    Returns:
+        per_hunk_string_exact: list[bool]
+        patch_string_em: float
+        patch_bleu: float
+        patch_ned: float
+    """
+    per_hunk_string_exact: List[bool] = []
+    bleu_vals: List[float] = []
+    ned_vals: List[float] = []
+
+    for s, e in spans:
+        pred_patch_ids = pred_list[s:e]
+        gt_patch_ids = gt_list[s:e]
+
+        pred_patch_text = tokenizer.decode(
+            pred_patch_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        gt_patch_text = tokenizer.decode(
+            gt_patch_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+        is_exact = patch_string_exact_match(pred_patch_text, gt_patch_text)
+        per_hunk_string_exact.append(is_exact)
+        bleu_vals.append(patch_bleu(pred_patch_text, gt_patch_text))
+        ned_vals.append(normalized_edit_distance(pred_patch_ids, gt_patch_ids))
+
+    return {
+        "per_hunk_string_exact": per_hunk_string_exact,
+        "patch_string_em": (
+            sum(1.0 if x else 0.0 for x in per_hunk_string_exact) / max(1, len(per_hunk_string_exact))
+        ),
+        "patch_bleu": sum(bleu_vals) / max(1, len(bleu_vals)),
+        "patch_ned": sum(ned_vals) / max(1, len(ned_vals)),
+    }
+
+
 # ============================================================
 # EVALUATION LOOP
 # ============================================================
@@ -423,19 +480,38 @@ def evaluate(
             tk_acc = top_k_accuracy(masked_logits, gt_masked_tensor, k=top_k)
             denoise_ce = masked_cross_entropy(final_logits, gt[0], mask_pos)
 
-        # CodeBLEU (optional)
-        cb = None
+        # Holistic patch metrics (aligned with baseline evaluation)
+        holistic = compute_holistic_patch_metrics(tokenizer, pred_list, gt_list, spans)
+
+        # CodeBLEU (optional) - full code for parity with baselines
+        cb_full = None
+        cb_masked = None
         if compute_codebleu_flag:
+            pred_full_code = tokenizer.decode(
+                pred_list,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            gt_full_code = tokenizer.decode(
+                gt_list,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            cb_full_result = compute_codebleu(pred_full_code, gt_full_code, language="java")
+            if cb_full_result:
+                cb_full = cb_full_result.get("codebleu")
+
+            # Keep masked-span CodeBLEU as a diagnostic metric.
             pred_tokens = []
             gt_tokens = []
             for s, e in spans:
                 pred_tokens.extend(pred_list[s:e])
                 gt_tokens.extend(gt_list[s:e])
-            pred_code = tokenizer.decode(pred_tokens, skip_special_tokens=True)
-            gt_code = tokenizer.decode(gt_tokens, skip_special_tokens=True)
-            cb_result = compute_codebleu(pred_code, gt_code, language="java")
-            if cb_result:
-                cb = cb_result.get("codebleu")
+            pred_masked_code = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+            gt_masked_code = tokenizer.decode(gt_tokens, skip_special_tokens=True)
+            cb_masked_result = compute_codebleu(pred_masked_code, gt_masked_code, language="java")
+            if cb_masked_result:
+                cb_masked = cb_masked_result.get("codebleu")
 
         wall_time = time.time() - t0
 
@@ -452,7 +528,11 @@ def evaluate(
             "cross_entropy_loss": denoise_ce,
             "edit_distance": ed,
             "top_k_accuracy": tk_acc,
-            "codebleu": cb,
+            "patch_string_em": holistic["patch_string_em"],
+            "patch_bleu": holistic["patch_bleu"],
+            "patch_ned": holistic["patch_ned"],
+            "codebleu": cb_full,
+            "codebleu_masked": cb_masked,
             "denoising_steps": result["steps_taken"],
             "wall_time_seconds": round(wall_time, 2),
         }
@@ -531,6 +611,11 @@ def main():
     output_dir = Path(args.output_dir)
 
     adapter = None if args.no_adapter else args.adapter_path
+    if args.no_adapter:
+        print("[INFO] Inference mode: base model only")
+    else:
+        print(f"[INFO] Inference mode: adapter path = {args.adapter_path}")
+
     model, tokenizer = load_model_and_tokenizer(
         base_model_name=args.base_model,
         adapter_path=adapter,
