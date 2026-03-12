@@ -19,12 +19,15 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
-from eval_metrics import (
+from evaluation import (
     token_exact_match_rate,
     per_hunk_exact_match,
     all_hunks_correct,
     masked_cross_entropy,
     token_edit_distance,
+    normalized_edit_distance,
+    patch_bleu,
+    patch_string_exact_match,
     top_k_accuracy,
     compute_codebleu,
     MetricsAggregator,
@@ -44,6 +47,16 @@ MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
 # ============================================================
 # HELPERS (reused from model.py)
 # ============================================================
+def num_training_samples_from_k(k: int) -> int:
+    """
+    Compute number of training examples for k hunks.
+    Includes all subsets with size >= 2: sum_{r=2..k} C(k,r) = 2^k - k - 1
+    """
+    if k < 2:
+        return 0
+    return (1 << k) - k - 1
+
+
 def _filter_spans(spans: List[List[int]], L: int) -> List[Tuple[int, int]]:
     """Clamp spans to [0, L]."""
     filtered: List[Tuple[int, int]] = []
@@ -186,6 +199,91 @@ def infill_denoise(
 
 
 @torch.no_grad()
+def batch_infill_denoise(
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    mask_positions: torch.Tensor,
+    mask_token_id: int,
+    steps: int = 64,
+    temperature: float = 0.0,
+    remasking: str = "low_confidence",
+) -> torch.Tensor:
+    """
+    Batched iterative denoising for infilling masked regions.
+
+    All samples in the batch must share the same mask_positions layout
+    (same prompt, same mask region). This is the common case for pass@k
+    benchmark generation where we generate k samples for the same prompt.
+
+    Args:
+        model: LLaDA model (or LoRA-merged model)
+        input_ids: (B, seq_len) with mask_token_id at masked positions
+        mask_positions: (seq_len,) boolean, True where masked (shared across batch)
+        mask_token_id: token ID used for masking
+        steps: number of denoising iterations
+        temperature: sampling temperature (0=greedy)
+        remasking: 'low_confidence' or 'random'
+
+    Returns:
+        (B, seq_len) tensor of predicted token ids.
+    """
+    B, L = input_ids.shape
+    x = input_ids.clone()
+    num_masked = mask_positions.sum().item()
+
+    if num_masked == 0:
+        return x
+
+    effective_steps = min(steps, num_masked)
+    schedule = compute_transfer_schedule(num_masked, effective_steps)
+
+    # (B, L) — track which positions are still masked per sample
+    still_masked = mask_positions.unsqueeze(0).expand(B, -1).clone()
+
+    for t, k_this_step in enumerate(schedule):
+        # Batched forward pass (the expensive part)
+        logits = model(x, attention_mask=torch.ones_like(x)).logits  # (B, L, V)
+
+        # Sample predictions
+        if temperature == 0.0:
+            predicted_tokens = logits.argmax(dim=-1)  # (B, L)
+        else:
+            noisy_logits = add_gumbel_noise(logits, temperature)  # (B, L, V)
+            predicted_tokens = noisy_logits.argmax(dim=-1)  # (B, L)
+
+        # Compute confidence
+        if remasking == "low_confidence":
+            probs = F.softmax(logits.float(), dim=-1)  # (B, L, V)
+            conf = probs.gather(
+                -1, predicted_tokens.unsqueeze(-1)
+            ).squeeze(-1)  # (B, L)
+        else:  # random
+            conf = torch.rand(B, L, device=x.device)
+
+        # Only consider still-masked positions
+        conf[~still_masked] = -float("inf")
+
+        # Determine which positions to unmask this step
+        if t == len(schedule) - 1:
+            # Last step: unmask everything remaining
+            unmask = still_masked
+        else:
+            # Top-k per sample
+            _, topk_indices = torch.topk(conf, k=k_this_step, dim=-1)  # (B, k)
+            unmask = torch.zeros_like(still_masked)
+            unmask.scatter_(1, topk_indices, True)
+
+        # Commit predictions at selected positions
+        x[unmask] = predicted_tokens[unmask]
+        still_masked[unmask] = False
+
+        # Re-mask remaining positions
+        x[still_masked] = mask_token_id
+
+    return x
+
+
+@torch.no_grad()
 def compute_loss_single_pass(
     model: torch.nn.Module,
     masked_input: torch.Tensor,
@@ -234,6 +332,11 @@ def load_model_and_tokenizer(
         model = PeftModel.from_pretrained(model, adapter_path)
         print("[INFO] Merging LoRA weights into base model...")
         model = model.merge_and_unload()
+    elif adapter_path:
+        print(f"[INFO] Adapter path provided but not found: {adapter_path}")
+        print("[INFO] Continuing with base model only (no LoRA adapter merged).")
+    else:
+        print("[INFO] --no-adapter enabled: running base model only (no LoRA adapter).")
 
     if device == "cuda" and torch.cuda.is_available():
         model = model.cuda()
@@ -332,6 +435,55 @@ def prepare_masked_input(
     return masked, gt, mask_pos, spans, mask_token_id
 
 
+def compute_holistic_patch_metrics(
+    tokenizer: AutoTokenizer,
+    pred_list: List[int],
+    gt_list: List[int],
+    spans: List[Tuple[int, int]],
+) -> Dict[str, Any]:
+    """
+    Compute patch-level holistic metrics aligned with baseline_reconstruction_eval.py.
+
+    Returns:
+        per_hunk_string_exact: list[bool]
+        patch_string_em: float
+        patch_bleu: float
+        patch_ned: float
+    """
+    per_hunk_string_exact: List[bool] = []
+    bleu_vals: List[float] = []
+    ned_vals: List[float] = []
+
+    for s, e in spans:
+        pred_patch_ids = pred_list[s:e]
+        gt_patch_ids = gt_list[s:e]
+
+        pred_patch_text = tokenizer.decode(
+            pred_patch_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+        gt_patch_text = tokenizer.decode(
+            gt_patch_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+        is_exact = patch_string_exact_match(pred_patch_text, gt_patch_text)
+        per_hunk_string_exact.append(is_exact)
+        bleu_vals.append(patch_bleu(pred_patch_text, gt_patch_text))
+        ned_vals.append(normalized_edit_distance(pred_patch_ids, gt_patch_ids))
+
+    return {
+        "per_hunk_string_exact": per_hunk_string_exact,
+        "patch_string_em": (
+            sum(1.0 if x else 0.0 for x in per_hunk_string_exact) / max(1, len(per_hunk_string_exact))
+        ),
+        "patch_bleu": sum(bleu_vals) / max(1, len(bleu_vals)),
+        "patch_ned": sum(ned_vals) / max(1, len(ned_vals)),
+    }
+
+
 # ============================================================
 # EVALUATION LOOP
 # ============================================================
@@ -394,6 +546,9 @@ def evaluate(
             pred_masked.extend(pred_list[s:e])
             gt_masked.extend(gt_list[s:e])
 
+        # Expected training samples for this record (k hunks -> 2^k - k - 1 samples)
+        training_samples_for_record = num_training_samples_from_k(len(spans))
+
         # Metrics
         em_rate = token_exact_match_rate(pred_masked, gt_masked)
         hunk_results = per_hunk_exact_match(pred_list, gt_list, spans)
@@ -410,19 +565,38 @@ def evaluate(
             tk_acc = top_k_accuracy(masked_logits, gt_masked_tensor, k=top_k)
             denoise_ce = masked_cross_entropy(final_logits, gt[0], mask_pos)
 
-        # CodeBLEU (optional)
-        cb = None
+        # Holistic patch metrics (aligned with baseline evaluation)
+        holistic = compute_holistic_patch_metrics(tokenizer, pred_list, gt_list, spans)
+
+        # CodeBLEU (optional) - full code for parity with baselines
+        cb_full = None
+        cb_masked = None
         if compute_codebleu_flag:
+            pred_full_code = tokenizer.decode(
+                pred_list,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            gt_full_code = tokenizer.decode(
+                gt_list,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            cb_full_result = compute_codebleu(pred_full_code, gt_full_code, language="java")
+            if cb_full_result:
+                cb_full = cb_full_result.get("codebleu")
+
+            # Keep masked-span CodeBLEU as a diagnostic metric.
             pred_tokens = []
             gt_tokens = []
             for s, e in spans:
                 pred_tokens.extend(pred_list[s:e])
                 gt_tokens.extend(gt_list[s:e])
-            pred_code = tokenizer.decode(pred_tokens, skip_special_tokens=True)
-            gt_code = tokenizer.decode(gt_tokens, skip_special_tokens=True)
-            cb_result = compute_codebleu(pred_code, gt_code, language="java")
-            if cb_result:
-                cb = cb_result.get("codebleu")
+            pred_masked_code = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+            gt_masked_code = tokenizer.decode(gt_tokens, skip_special_tokens=True)
+            cb_masked_result = compute_codebleu(pred_masked_code, gt_masked_code, language="java")
+            if cb_masked_result:
+                cb_masked = cb_masked_result.get("codebleu")
 
         wall_time = time.time() - t0
 
@@ -430,6 +604,7 @@ def evaluate(
             "id": record["id"],
             "seq_len": len(record["input_ids"]),
             "num_hunks": len(spans),
+            "training_samples_generated": training_samples_for_record,
             "total_masked_tokens": int(num_masked),
             "token_exact_match": em_rate,
             "per_hunk_exact": hunk_results,
@@ -438,7 +613,11 @@ def evaluate(
             "cross_entropy_loss": denoise_ce,
             "edit_distance": ed,
             "top_k_accuracy": tk_acc,
-            "codebleu": cb,
+            "patch_string_em": holistic["patch_string_em"],
+            "patch_bleu": holistic["patch_bleu"],
+            "patch_ned": holistic["patch_ned"],
+            "codebleu": cb_full,
+            "codebleu_masked": cb_masked,
             "denoising_steps": result["steps_taken"],
             "wall_time_seconds": round(wall_time, 2),
         }
@@ -453,8 +632,8 @@ def evaluate(
         status = "ALL_CORRECT" if ahc else f"EM={em_rate:.2f}"
         print(
             f"  [{i+1}] id={record['id'][:12]}.. "
-            f"hunks={len(spans)} masked={int(num_masked)} "
-            f"{status} CE={sp_ce:.3f} t={wall_time:.1f}s"
+            f"hunks={len(spans)} (gen {training_samples_for_record} train samples) "
+            f"masked={int(num_masked)} {status} CE={sp_ce:.3f} t={wall_time:.1f}s"
         )
 
     if results_file:
@@ -517,6 +696,11 @@ def main():
     output_dir = Path(args.output_dir)
 
     adapter = None if args.no_adapter else args.adapter_path
+    if args.no_adapter:
+        print("[INFO] Inference mode: base model only")
+    else:
+        print(f"[INFO] Inference mode: adapter path = {args.adapter_path}")
+
     model, tokenizer = load_model_and_tokenizer(
         base_model_name=args.base_model,
         adapter_path=adapter,
