@@ -1,0 +1,105 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mdlm-train
+  labels:
+    app: mdlm-code-fixer
+    task: train
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: mdlm-code-fixer
+        task: train
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: train
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+        command:
+          - bash
+          - -c
+          - |
+            apt-get update && apt-get install -y git &&
+            pip install --no-cache-dir "transformers==4.44.2" peft accelerate bitsandbytes &&
+            git clone https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
+            cd /workspace/mdlm-bug-fixer &&
+            git checkout inference-pipeline &&
+            python model.py --use-bf16 --split train 2>&1 | tee /outputs/train.log
+
+        resources:
+          limits:
+            nvidia.com/a100: "1"
+            memory: "32Gi"
+            cpu: "2"
+          requests:
+            nvidia.com/a100: "1"
+            memory: "32Gi"
+            cpu: "2"
+
+        volumeMounts:
+          - name: cache-volume
+            mountPath: /cache
+          - name: outputs-volume
+            mountPath: /outputs
+          - name: dev-shm
+            mountPath: /dev/shm
+
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: true
+        - name: HF_HOME
+          value: "/cache/hf"
+        - name: TRANSFORMERS_CACHE
+          value: "/cache/hf/transformers"
+        - name: HF_DATASETS_CACHE
+          value: "/cache/hf/datasets"
+        - name: TORCH_HOME
+          value: "/cache/torch"
+        - name: PIP_CACHE_DIR
+          value: "/cache/pip"
+        - name: OUTPUT_DIR
+          value: "/outputs"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+
+      tolerations:
+        - key: nautilus.io/reservation
+          operator: Exists
+          effect: NoSchedule
+        - effect: NoSchedule
+          key: nautilus.io/hardware
+          operator: Equal
+          value: large-gpu
+        - effect: PreferNoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                  - NVIDIA-A100-SXM4-80GB
+
+      volumes:
+        - name: cache-volume
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: outputs-volume
+          persistentVolumeClaim:
+            claimName: mdlm-outputs
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
