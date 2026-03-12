@@ -6,6 +6,7 @@ Adapts the infill_denoise loop for open-ended code generation (append-and-denois
 so that the model can be evaluated on standard coding benchmarks like HumanEval/MBPP.
 """
 
+import re
 from typing import List, Optional
 
 import torch
@@ -88,6 +89,40 @@ def get_stop_sequences(prompt: str, custom: Optional[List[str]] = None) -> List[
     if "\ndef " in prompt or prompt.lstrip().startswith("def "):
         return STOP_SEQUENCES_WITH_DEF
     return DEFAULT_STOP_SEQUENCES
+
+
+# ============================================================
+# Post-Processing: Extract Code from Model Output
+# ============================================================
+def extract_code(text: str) -> str:
+    """
+    Extract executable Python code from model output.
+
+    Handles:
+      1. Markdown code blocks (```python ... ``` or ``` ... ```)
+      2. Natural language preamble before code (e.g., "Here's the function:\n\ndef ...")
+      3. Clean code (returned as-is)
+    """
+    if not text.strip():
+        return text
+
+    # 1. Extract from markdown code blocks — take the longest python block
+    blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
+    if blocks:
+        return max(blocks, key=len).strip()
+
+    # 2. If text starts with natural language, find the first def/class/import
+    stripped = text.lstrip()
+    if stripped and not stripped[0] in (" ", "\t") and not any(
+        stripped.startswith(kw) for kw in ("def ", "class ", "import ", "from ", "@")
+    ):
+        # Find the first line that looks like code
+        for pattern in [r"\ndef ", r"\nclass ", r"\nimport ", r"\nfrom ", r"\n@"]:
+            match = re.search(pattern, text)
+            if match:
+                return text[match.start() + 1:]  # +1 to skip the leading \n
+
+    return text
 
 
 # ============================================================
@@ -208,6 +243,7 @@ def generate_completion(
         for b in range(chunk):
             gen_ids = predicted[b, P:].tolist()
             gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+            gen_text = extract_code(gen_text)
             gen_text = truncate_at_stop(gen_text, stop_sequences)
             completions.append(gen_text)
 
