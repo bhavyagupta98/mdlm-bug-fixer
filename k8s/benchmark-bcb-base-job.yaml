@@ -1,17 +1,17 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-benchmark-base-mbpp
+  name: mdlm-benchmark-bcb-base
   labels:
     app: mdlm-code-fixer
-    task: benchmark-base-mbpp
+    task: benchmark-bcb-base
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
         app: mdlm-code-fixer
-        task: benchmark-base
+        task: benchmark-bcb-base
     spec:
       restartPolicy: Never
       containers:
@@ -24,20 +24,23 @@ spec:
             apt-get update && apt-get install -y git &&
             pip install --no-cache-dir \
               "transformers==4.44.2" peft accelerate bitsandbytes \
-              evalplus datasets &&
+              bigcodebench datasets &&
             git clone https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
             cd /workspace/mdlm-bug-fixer &&
             git checkout main &&
 
-            echo "=== MBPP (base model, 5 samples) ===" &&
-            python run_evalplus.py \
-              --benchmark mbpp \
+            echo "=== BigCodeBench (base model, 5 samples) ===" &&
+            python run_bigcodebench.py \
               --no-adapter \
-              --num-samples 1 \
-              --steps 256 \
-              --temperature 0 \
+              --variant complete \
+              --subset full \
+              --num-samples 5 \
+              --max-new-tokens 1024 \
+              --steps 128 \
+              --temperature 0.5 \
               --batch-size 4 \
-              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_instruct_base.log
+              --instruct \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/bcb_instruct_base.log
 
         resources:
           limits:
