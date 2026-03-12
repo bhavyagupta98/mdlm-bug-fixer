@@ -33,19 +33,41 @@ spec:
             python run_evalplus.py \
               --benchmark humaneval \
               --no-adapter \
-              --num-samples 1 \
+              --num-samples 5 \
               --steps 128 \
-              --temperature 0.0 \
+              --temperature 0.5 \
+              --batch-size 4 \
               --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/humaneval_base_pass1.log &&
+
+            echo "=== HumanEval pass@1 (LoRA, greedy) ===" &&
+            python run_evalplus.py \
+              --benchmark humaneval \
+              --adapter-path /outputs/run2/llada_lora/lora_adapter \
+              --num-samples 5 \
+              --steps 128 \
+              --temperature 0.5 \
+              --batch-size 4 \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/humaneval_lora_pass1.log &&
 
             echo "=== MBPP pass@1 (base, greedy) ===" &&
             python run_evalplus.py \
               --benchmark mbpp \
               --no-adapter \
-              --num-samples 1 \
+              --num-samples 5 \
               --steps 128 \
-              --temperature 0.0 \
-              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_base_pass1.log
+              --temperature 0.5 \
+              --batch-size 4 \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_base_pass1.log &&
+
+            echo "=== MBPP pass@1 (LoRA, greedy) ===" &&
+            python run_evalplus.py \
+              --benchmark mbpp \
+              --adapter-path /outputs/run2/llada_lora/lora_adapter \
+              --num-samples 5 \
+              --steps 128 \
+              --temperature 0.5 \
+              --batch-size 4 \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_lora_pass1.log
 
         resources:
           limits:
