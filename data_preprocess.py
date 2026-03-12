@@ -102,24 +102,19 @@ def main():
         TOKENIZER_NAME, trust_remote_code=True, use_fast=True
     )
 
-    mask_token_id = None
-    # Resolve mask token id (LLaDA does not define one by default)
-    if tokenizer.mask_token_id is not None:
+    # Resolve mask token id: LLaDA uses <|mdm_mask|> (id=126336)
+    MDM_MASK_TOKEN = "<|mdm_mask|>"
+    vocab = tokenizer.get_vocab()
+    if MDM_MASK_TOKEN in vocab:
+        mask_token_id = vocab[MDM_MASK_TOKEN]
+    elif tokenizer.mask_token_id is not None:
         mask_token_id = tokenizer.mask_token_id
     else:
-        MASK_TOKEN = "<|mask|>"
-        if MASK_TOKEN not in tokenizer.get_vocab():
-            tokenizer.add_special_tokens(
-                {"additional_special_tokens": [MASK_TOKEN]}
-            )
-        mask_token_id = tokenizer.convert_tokens_to_ids(MASK_TOKEN)
-
+        raise RuntimeError(
+            "Could not resolve mask token id. Expected <|mdm_mask|> in vocab."
+        )
 
     print("[INFO] mask_token_id:", mask_token_id)
-    if mask_token_id is None:
-        raise RuntimeError(
-            "Tokenizer has no mask_token_id. Pick a tokenizer/config that defines a mask token."
-        )
 
     rng = random.Random(RANDOM_SEED)
 

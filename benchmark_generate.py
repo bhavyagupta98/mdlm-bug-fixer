@@ -18,30 +18,42 @@ from inference import (
 
 
 # ============================================================
-# Mask Token Resolution (matches data_preprocess.py logic)
+# Mask Token Resolution
 # ============================================================
-MASK_TOKEN = "<|mask|>"
+# LLaDA uses <|mdm_mask|> (id=126336) as its mask token.
+# The model config stores this as config.mask_token_id.
+MDM_MASK_TOKEN = "<|mdm_mask|>"
 
 
 def resolve_mask_token_id(tokenizer, model: Optional[torch.nn.Module] = None) -> int:
     """
-    Resolve the mask token id, adding <|mask|> if needed.
+    Resolve the mask token id for LLaDA.
 
-    If a model is provided and the tokenizer vocab is extended, the model's
-    embedding table is resized to match.
+    Priority:
+      1. Model config's mask_token_id (authoritative for LLaDA)
+      2. <|mdm_mask|> token in tokenizer vocab
+      3. tokenizer.mask_token_id (generic fallback)
     """
+    # Check model config first (LLaDA config defines mask_token_id = 126336)
+    if model is not None:
+        config = getattr(model, "config", None)
+        config_mask_id = getattr(config, "mask_token_id", None)
+        if config_mask_id is not None:
+            return int(config_mask_id)
+
+    # Check for <|mdm_mask|> in vocab
+    vocab = tokenizer.get_vocab()
+    if MDM_MASK_TOKEN in vocab:
+        return vocab[MDM_MASK_TOKEN]
+
+    # Generic fallback
     if tokenizer.mask_token_id is not None:
         return tokenizer.mask_token_id
-    if MASK_TOKEN not in tokenizer.get_vocab():
-        tokenizer.add_special_tokens(
-            {"additional_special_tokens": [MASK_TOKEN]}
-        )
-        if model is not None:
-            model.resize_token_embeddings(len(tokenizer))
-    tid = tokenizer.convert_tokens_to_ids(MASK_TOKEN)
-    if tid is None:
-        raise RuntimeError("Could not resolve mask token id from tokenizer.")
-    return tid
+
+    raise RuntimeError(
+        "Could not resolve mask token id. Expected <|mdm_mask|> in vocab "
+        "or mask_token_id in model config."
+    )
 
 
 # ============================================================
