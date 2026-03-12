@@ -10,16 +10,36 @@ BUG_IDS="${BUG_IDS:-}"
 BUG_LIMIT="${BUG_LIMIT:-10}"
 BASE_OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/runs/java_swebench}"
 
-# Modes to run: localized, generative, or both (default)
+# Models to benchmark (default: both)
+# Format: "llada llama" or override as MODELS="llada"
+MODELS="${MODELS:-llada llama}"
+
+# Modes to run (localized, generative, or both)
 MODES="${MODES:-localized generative}"
 
 # Generative mode generation budget
 ORACLE_LENGTH="${ORACLE_LENGTH:-1}"   # 1=use oracle length, 0=use --max-new-tokens
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
 
-# ----------------------------------------------------------------
-# Shared base args (common to both modes)
-# ----------------------------------------------------------------
+# LoRA adapter for LLaDA
+ADAPTER_PATH="${ADAPTER_PATH:-$ROOT_DIR/runs/llada_lora/lora_adapter}"
+
+# ================================================================
+# Model configuration (name → HF model ID)
+# ================================================================
+declare -A MODEL_IDS=(
+  ["llada"]="GSAI-ML/LLaDA-8B-Instruct"
+  ["llama"]="meta-llama/Llama-2-7b-chat"
+)
+
+declare -A HAS_ADAPTER=(
+  ["llada"]=1        # LLaDA has LoRA adapter variants
+  ["llama"]=0        # Llama is used as-is
+)
+
+# ================================================================
+# Shared base args (common to all runs)
+# ================================================================
 BASE_ARGS=(
   python run_java_swebench.py
   --projects "$PROJECTS"
@@ -39,44 +59,82 @@ ADAPTER_PATH="${ADAPTER_PATH:-$ROOT_DIR/runs/llada_lora/lora_adapter}"
 echo "[INFO] Projects:   $PROJECTS"
 echo "[INFO] Bug ids:    ${BUG_IDS:-<all>}"
 echo "[INFO] Bug limit:  $BUG_LIMIT"
+echo "[INFO] Models:     $MODELS"
 echo "[INFO] Modes:      $MODES"
 
-# ----------------------------------------------------------------
-# Run each (mode, adapter) combination
-# ----------------------------------------------------------------
-for MODE in $MODES; do
-  for ADAPTER_LABEL in base finetuned; do
-    if [[ "$ADAPTER_LABEL" == "finetuned" ]]; then
-      if [[ ! -d "$ADAPTER_PATH" ]]; then
-        echo "[WARN] Adapter not found at $ADAPTER_PATH — skipping finetuned run"
-        continue
-      fi
-      ADAPTER_ARGS=(--adapter-path "$ADAPTER_PATH")
+# ================================================================
+# Main benchmark loop: model × mode × (adapter for llada)
+# ================================================================
+for MODEL in $MODELS; do
+  MODEL_ID="${MODEL_IDS[$MODEL]}"
+  SUPPORTS_ADAPTER=${HAS_ADAPTER[$MODEL]}
+
+  echo ""
+  echo "╔═════════════════════════════════════════════════════════════╗"
+  echo "║  MODEL: $MODEL ($MODEL_ID)"
+  echo "╚═════════════════════════════════════════════════════════════╝"
+
+  for MODE in $MODES; do
+    if [[ $SUPPORTS_ADAPTER -eq 1 ]]; then
+      # LLaDA: run both base and finetuned
+      for ADAPTER_LABEL in base finetuned; do
+        if [[ "$ADAPTER_LABEL" == "finetuned" ]]; then
+          if [[ ! -d "$ADAPTER_PATH" ]]; then
+            echo "[WARN] Adapter not found at $ADAPTER_PATH — skipping $MODEL finetuned run"
+            continue
+          fi
+          ADAPTER_ARGS=(--adapter-path "$ADAPTER_PATH")
+        else
+          ADAPTER_ARGS=(--no-adapter)
+        fi
+
+        OUTPUT_DIR="$BASE_OUTPUT_DIR/${MODEL}_${ADAPTER_LABEL}_${MODE}"
+        CMD=("${BASE_ARGS[@]}" --base-model "$MODEL_ID" --mode "$MODE" \
+             --output-dir "$OUTPUT_DIR" "${ADAPTER_ARGS[@]}")
+
+        if [[ "$MODE" == "generative" ]]; then
+          if [[ "$ORACLE_LENGTH" == "1" ]]; then
+            CMD+=(--oracle-length)
+          else
+            CMD+=(--max-new-tokens "$MAX_NEW_TOKENS")
+          fi
+        fi
+
+        echo ""
+        echo "──────────────────────────────────────────────────────────"
+        echo "[RUN] $MODEL (${ADAPTER_LABEL}) + $MODE mode"
+        echo "      Output: $OUTPUT_DIR"
+        echo "──────────────────────────────────────────────────────────"
+
+        "${CMD[@]}"
+      done
     else
-      ADAPTER_ARGS=(--no-adapter)
-    fi
+      # Llama: just run without adapters
+      OUTPUT_DIR="$BASE_OUTPUT_DIR/${MODEL}_${MODE}"
+      CMD=("${BASE_ARGS[@]}" --base-model "$MODEL_ID" --mode "$MODE" \
+           --output-dir "$OUTPUT_DIR" --no-adapter)
 
-    OUTPUT_DIR="$BASE_OUTPUT_DIR/${MODE}_${ADAPTER_LABEL}"
-    CMD=("${BASE_ARGS[@]}" --mode "$MODE" --output-dir "$OUTPUT_DIR" "${ADAPTER_ARGS[@]}")
-
-    if [[ "$MODE" == "generative" ]]; then
-      if [[ "$ORACLE_LENGTH" == "1" ]]; then
-        CMD+=(--oracle-length)
-      else
-        CMD+=(--max-new-tokens "$MAX_NEW_TOKENS")
+      if [[ "$MODE" == "generative" ]]; then
+        if [[ "$ORACLE_LENGTH" == "1" ]]; then
+          CMD+=(--oracle-length)
+        else
+          CMD+=(--max-new-tokens "$MAX_NEW_TOKENS")
+        fi
       fi
+
+      echo ""
+      echo "──────────────────────────────────────────────────────────"
+      echo "[RUN] $MODEL + $MODE mode"
+      echo "      Output: $OUTPUT_DIR"
+      echo "──────────────────────────────────────────────────────────"
+
+      "${CMD[@]}"
     fi
-
-    echo ""
-    echo "========================================================"
-    echo "[INFO] Mode: $MODE  |  Adapter: $ADAPTER_LABEL  →  $OUTPUT_DIR"
-    echo "========================================================"
-    printf '[INFO] Command: %q ' "${CMD[@]}"
-    printf '\n'
-
-    "${CMD[@]}"
   done
 done
 
 echo ""
-echo "[INFO] All modes complete. Results under: $BASE_OUTPUT_DIR"
+echo "╔═════════════════════════════════════════════════════════════╗"
+echo "║  BENCHMARK COMPLETE"
+echo "║  Results:  $BASE_OUTPUT_DIR"
+echo "╚═════════════════════════════════════════════════════════════╝"

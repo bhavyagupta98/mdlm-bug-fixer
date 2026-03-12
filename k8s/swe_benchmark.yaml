@@ -1,0 +1,133 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swe-benchmark
+  labels:
+    app: mdlm-code-fixer
+    task: swe-benchmark
+spec:
+  backoffLimit: 0          # do not retry on failure
+  ttlSecondsAfterFinished: 3600   # clean up after 24 h
+  template:
+    metadata:
+      labels:
+        app: mdlm-code-fixer
+        task: swe-benchmark
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: swe-benchmark
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+        command:
+          - bash
+          - -c
+          - |
+            set -euo pipefail
+            apt-get update -qq && apt-get install -y -q git maven default-jdk wget unzip cpanminus perl curl &&
+            pip install --root-user-action=ignore --no-cache-dir \
+              "transformers==4.44.2" peft accelerate bitsandbytes \
+              codebleu sacrebleu &&
+            git clone --branch final2 --single-branch https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
+            cd /workspace/mdlm-bug-fixer &&
+            wget -q https://github.com/rjust/defects4j/archive/refs/tags/v2.0.0.tar.gz -O /tmp/d4j.tar.gz &&
+            tar -xzf /tmp/d4j.tar.gz -C /opt &&
+            mv /opt/defects4j-2.0.0 /opt/defects4j &&
+            cd /opt/defects4j && cpanm --installdeps . -q && ./init.sh &&
+            cd /workspace/mdlm-bug-fixer &&
+            DEFECTS4J_HOME=/opt/defects4j \
+            PROJECTS="${PROJECTS:-Lang,Math}" \
+            BUG_LIMIT="${BUG_LIMIT:-10}" \
+            OUTPUT_DIR=/outputs/java_swebench \
+            bash run_java_swebench.sh &&
+            echo "[INFO] Benchmark complete. Results in /outputs/java_swebench"
+
+        resources:
+          limits:
+            nvidia.com/a100: "1"
+            memory: "32Gi"
+            cpu: "2"
+          requests:
+            nvidia.com/a100: "1"
+            memory: "32Gi"
+            cpu: "2"
+
+        volumeMounts:
+          - name: cache-volume
+            mountPath: /cache
+          - name: outputs-volume
+            mountPath: /outputs
+          - name: dev-shm
+            mountPath: /dev/shm
+
+        env:
+        # HuggingFace token (required for gated models)
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: true
+
+        # Benchmark parameters (override via Job env or kubectl)
+        - name: PROJECTS
+          value: "Lang,Math"
+        - name: BUG_LIMIT
+          value: "10"
+
+        # Cache directories
+        - name: HF_HOME
+          value: "/cache/hf"
+        - name: TRANSFORMERS_CACHE
+          value: "/cache/hf/transformers"
+        - name: HF_DATASETS_CACHE
+          value: "/cache/hf/datasets"
+        - name: TORCH_HOME
+          value: "/cache/torch"
+        - name: PIP_CACHE_DIR
+          value: "/cache/pip"
+
+        # Python and CUDA settings
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        # Models to benchmark (space-separated: "llada llama")
+        - name: MODELS
+          value: "llada llama"
+
+      tolerations:
+        - key: nautilus.io/reservation
+          operator: Exists
+          effect: NoSchedule
+        - effect: NoSchedule
+          key: nautilus.io/hardware
+          operator: Equal
+          value: large-gpu
+        - effect: PreferNoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        - key: nautilus.io/issue
+          operator: Exists
+          effect: NoSchedule
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+
+      volumes:
+        - name: cache-volume
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: outputs-volume
+          persistentVolumeClaim:
+            claimName: bgupta-pvc
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
