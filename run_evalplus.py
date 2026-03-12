@@ -80,7 +80,7 @@ def generate_samples(
 
     Returns list of {"task_id": str, "completion": str} dicts.
     """
-    mask_token_id = resolve_mask_token_id(tokenizer)
+    mask_token_id = resolve_mask_token_id(tokenizer, model)
     gen_fn = generate_completion_instruct if instruct else generate_completion
 
     all_samples = []
@@ -112,10 +112,11 @@ def generate_samples(
             })
 
         # Progress
+        avg_len = sum(len(c) for c in completions) / len(completions) if completions else 0
         print(
             f"  [{idx + 1}/{total}] {task_id} "
             f"samples={len(completions)} "
-            f"avg_len={sum(len(c) for c in completions) / len(completions):.0f}chars "
+            f"avg_len={avg_len:.0f}chars "
             f"t={elapsed:.1f}s"
         )
 
@@ -154,7 +155,8 @@ def run_evalplus_evaluation(
     results_dir = samples_file.parent
     eval_results = list(results_dir.glob("*eval_results*"))
     if eval_results:
-        with open(eval_results[-1]) as f:
+        latest = max(eval_results, key=lambda p: p.stat().st_mtime)
+        with open(latest) as f:
             return json.load(f)
 
     return None
@@ -271,8 +273,11 @@ def main():
 
     else:
         # Eval-only: use provided samples file
-        if args.samples_file:
-            samples_path = Path(args.samples_file)
+        if not args.samples_file:
+            print("[ERROR] --eval-only requires --samples-file")
+            sys.exit(1)
+        samples_path = Path(args.samples_file)
+        samples_filename = samples_path.name  # use actual filename for results
         if not samples_path.exists():
             print(f"[ERROR] Samples file not found: {samples_path}")
             sys.exit(1)

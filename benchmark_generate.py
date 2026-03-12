@@ -6,7 +6,6 @@ Adapts the infill_denoise loop for open-ended code generation (append-and-denois
 so that the model can be evaluated on standard coding benchmarks like HumanEval/MBPP.
 """
 
-import re
 from typing import List, Optional
 
 import torch
@@ -20,14 +19,21 @@ from inference import infill_denoise, load_model_and_tokenizer  # noqa: F401
 MASK_TOKEN = "<|mask|>"
 
 
-def resolve_mask_token_id(tokenizer) -> int:
-    """Resolve the mask token id, adding <|mask|> if needed."""
+def resolve_mask_token_id(tokenizer, model: Optional[torch.nn.Module] = None) -> int:
+    """
+    Resolve the mask token id, adding <|mask|> if needed.
+
+    If a model is provided and the tokenizer vocab is extended, the model's
+    embedding table is resized to match.
+    """
     if tokenizer.mask_token_id is not None:
         return tokenizer.mask_token_id
     if MASK_TOKEN not in tokenizer.get_vocab():
         tokenizer.add_special_tokens(
             {"additional_special_tokens": [MASK_TOKEN]}
         )
+        if model is not None:
+            model.resize_token_embeddings(len(tokenizer))
     tid = tokenizer.convert_tokens_to_ids(MASK_TOKEN)
     if tid is None:
         raise RuntimeError("Could not resolve mask token id from tokenizer.")
@@ -97,13 +103,17 @@ def generate_completion(
         List of `num_samples` completion strings (prompt is NOT included).
     """
     if mask_token_id is None:
-        mask_token_id = resolve_mask_token_id(tokenizer)
+        mask_token_id = resolve_mask_token_id(tokenizer, model)
 
     if stop_sequences is None:
         stop_sequences = DEFAULT_STOP_SEQUENCES
 
-    # Tokenize prompt
+    # Tokenize prompt, cap to avoid excessively long sequences
+    MAX_PROMPT_LEN = 1536  # leave room for generation within 2048 context
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    if len(prompt_ids) > MAX_PROMPT_LEN:
+        print(f"[WARN] Prompt truncated from {len(prompt_ids)} to {MAX_PROMPT_LEN} tokens")
+        prompt_ids = prompt_ids[:MAX_PROMPT_LEN]
     P = len(prompt_ids)
     M = max_new_tokens
     total_len = P + M
@@ -218,16 +228,25 @@ def _extract_function_body(completion: str, original_prompt: str) -> str:
     Try to extract just the function body if the model repeated the signature.
     If the completion starts with recognizable code, return as-is.
     """
-    # Check if the completion contains the original function signature
-    # (instruct models sometimes repeat it)
     lines = original_prompt.strip().split("\n")
-    if lines:
-        sig_line = lines[0].strip()
-        idx = completion.find(sig_line)
-        if idx > 0:
-            # Find where the prompt content ends and new code begins
-            prompt_end = completion.find(lines[-1].strip(), idx)
+    if not lines:
+        return completion
+
+    sig_line = lines[0].strip()
+    if not sig_line:
+        return completion
+
+    idx = completion.find(sig_line)
+    if idx != -1:
+        # Find a non-empty last line of the prompt to use as landmark
+        last_line = ""
+        for line in reversed(lines):
+            if line.strip():
+                last_line = line.strip()
+                break
+        if last_line:
+            prompt_end = completion.find(last_line, idx)
             if prompt_end != -1:
-                after = prompt_end + len(lines[-1].strip())
+                after = prompt_end + len(last_line)
                 return completion[after:]
     return completion
