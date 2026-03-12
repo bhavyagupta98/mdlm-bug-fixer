@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: carla
+  name: vlm-jupyter-debug
   labels:
-    app: carla
+    app: mdlm-code-fixer
     task: debugger
 spec:
   restartPolicy: Never
   containers:
-  - name: carla
+  - name: jupyter-container
     image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
     command:
       - bash
@@ -16,16 +16,16 @@ spec:
       - |
         apt-get update && apt-get install -y git &&
         pip install --root-user-action=ignore --no-cache-dir jupyterlab "transformers==4.44.2" peft accelerate bitsandbytes &&
-        git clone -b final --single-branch https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
+        git clone https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
         jupyter lab --ip=0.0.0.0 --no-browser --allow-root --ServerApp.root_dir=/workspace/mdlm-bug-fixer --IdentityProvider.token=selfimprove
 
     resources:
       limits:
-        nvidia.com/a100: "1"
+        nvidia.com/rtxa6000: "1"
         memory: "32Gi"
         cpu: "2"
       requests:
-        nvidia.com/a100: "1"
+        nvidia.com/rtxa6000: "1"
         memory: "32Gi"
         cpu: "2"
 
@@ -98,7 +98,7 @@ spec:
         sizeLimit: 100Gi
     - name: outputs-volume
       persistentVolumeClaim:
-        claimName: bgupta-pvc
+        claimName: mdlm-outputs
     - name: dev-shm
       emptyDir:
         medium: Memory
