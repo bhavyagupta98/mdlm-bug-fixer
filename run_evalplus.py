@@ -29,6 +29,7 @@ from typing import Dict, List, Optional
 import torch
 
 from benchmark_generate import (
+    DEFAULT_BATCH_SIZE,
     generate_completion,
     generate_completion_instruct,
     resolve_mask_token_id,
@@ -73,6 +74,7 @@ def generate_samples(
     temperature: float = 0.0,
     remasking: str = "low_confidence",
     instruct: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     device: str = "cuda",
 ) -> List[Dict]:
     """
@@ -100,6 +102,7 @@ def generate_samples(
             temperature=temperature,
             remasking=remasking,
             num_samples=num_samples,
+            batch_size=batch_size,
             device=device,
         )
 
@@ -195,6 +198,8 @@ def parse_args() -> argparse.Namespace:
                         choices=["low_confidence", "random"])
     parser.add_argument("--instruct", action="store_true",
                         help="Use instruct chat template wrapping")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"Batch size for parallel sample generation (default: {DEFAULT_BATCH_SIZE})")
 
     # Output
     parser.add_argument("--output-dir", type=str, default=str(DEFAULT_OUTPUT_DIR))
@@ -248,7 +253,8 @@ def main():
         print(
             f"\n[GEN] benchmark={args.benchmark} model={model_tag} prompt={prompt_tag}"
             f"\n[GEN] samples={args.num_samples} steps={args.steps} "
-            f"temp={args.temperature} max_tokens={args.max_new_tokens}"
+            f"temp={args.temperature} max_tokens={args.max_new_tokens} "
+            f"batch_size={args.batch_size}"
         )
 
         samples = generate_samples(
@@ -261,6 +267,7 @@ def main():
             temperature=args.temperature,
             remasking=args.remasking,
             instruct=args.instruct,
+            batch_size=args.batch_size,
             device=args.device,
         )
 

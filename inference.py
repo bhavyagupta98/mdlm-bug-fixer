@@ -199,6 +199,91 @@ def infill_denoise(
 
 
 @torch.no_grad()
+def batch_infill_denoise(
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    mask_positions: torch.Tensor,
+    mask_token_id: int,
+    steps: int = 64,
+    temperature: float = 0.0,
+    remasking: str = "low_confidence",
+) -> torch.Tensor:
+    """
+    Batched iterative denoising for infilling masked regions.
+
+    All samples in the batch must share the same mask_positions layout
+    (same prompt, same mask region). This is the common case for pass@k
+    benchmark generation where we generate k samples for the same prompt.
+
+    Args:
+        model: LLaDA model (or LoRA-merged model)
+        input_ids: (B, seq_len) with mask_token_id at masked positions
+        mask_positions: (seq_len,) boolean, True where masked (shared across batch)
+        mask_token_id: token ID used for masking
+        steps: number of denoising iterations
+        temperature: sampling temperature (0=greedy)
+        remasking: 'low_confidence' or 'random'
+
+    Returns:
+        (B, seq_len) tensor of predicted token ids.
+    """
+    B, L = input_ids.shape
+    x = input_ids.clone()
+    num_masked = mask_positions.sum().item()
+
+    if num_masked == 0:
+        return x
+
+    effective_steps = min(steps, num_masked)
+    schedule = compute_transfer_schedule(num_masked, effective_steps)
+
+    # (B, L) — track which positions are still masked per sample
+    still_masked = mask_positions.unsqueeze(0).expand(B, -1).clone()
+
+    for t, k_this_step in enumerate(schedule):
+        # Batched forward pass (the expensive part)
+        logits = model(x, attention_mask=torch.ones_like(x)).logits  # (B, L, V)
+
+        # Sample predictions
+        if temperature == 0.0:
+            predicted_tokens = logits.argmax(dim=-1)  # (B, L)
+        else:
+            noisy_logits = add_gumbel_noise(logits, temperature)  # (B, L, V)
+            predicted_tokens = noisy_logits.argmax(dim=-1)  # (B, L)
+
+        # Compute confidence
+        if remasking == "low_confidence":
+            probs = F.softmax(logits.float(), dim=-1)  # (B, L, V)
+            conf = probs.gather(
+                -1, predicted_tokens.unsqueeze(-1)
+            ).squeeze(-1)  # (B, L)
+        else:  # random
+            conf = torch.rand(B, L, device=x.device)
+
+        # Only consider still-masked positions
+        conf[~still_masked] = -float("inf")
+
+        # Determine which positions to unmask this step
+        if t == len(schedule) - 1:
+            # Last step: unmask everything remaining
+            unmask = still_masked
+        else:
+            # Top-k per sample
+            _, topk_indices = torch.topk(conf, k=k_this_step, dim=-1)  # (B, k)
+            unmask = torch.zeros_like(still_masked)
+            unmask.scatter_(1, topk_indices, True)
+
+        # Commit predictions at selected positions
+        x[unmask] = predicted_tokens[unmask]
+        still_masked[unmask] = False
+
+        # Re-mask remaining positions
+        x[still_masked] = mask_token_id
+
+    return x
+
+
+@torch.no_grad()
 def compute_loss_single_pass(
     model: torch.nn.Module,
     masked_input: torch.Tensor,

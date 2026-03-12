@@ -10,7 +10,11 @@ from typing import List, Optional
 
 import torch
 
-from inference import infill_denoise, load_model_and_tokenizer  # noqa: F401
+from inference import (
+    batch_infill_denoise,
+    infill_denoise,
+    load_model_and_tokenizer,  # noqa: F401
+)
 
 
 # ============================================================
@@ -64,6 +68,9 @@ def truncate_at_stop(text: str, stop_sequences: List[str]) -> str:
 # ============================================================
 # Core Generation (Append-and-Denoise)
 # ============================================================
+DEFAULT_BATCH_SIZE = 4  # fits 8B model in bf16 on A100 80GB with 2048 seq_len
+
+
 def generate_completion(
     model: torch.nn.Module,
     tokenizer,
@@ -75,6 +82,7 @@ def generate_completion(
     remasking: str = "low_confidence",
     stop_sequences: Optional[List[str]] = None,
     num_samples: int = 1,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     device: str = "cuda",
 ) -> List[str]:
     """
@@ -83,8 +91,11 @@ def generate_completion(
     Approach (Append-and-Denoise):
       1. Tokenize the prompt (length P).
       2. Append M mask tokens to create a sequence of length P+M.
-      3. Run infill_denoise on the masked suffix.
+      3. Run batched infill_denoise on the masked suffix.
       4. Decode and truncate at stop sequences.
+
+    When num_samples > 1, samples are generated in batches of `batch_size`
+    for improved throughput on GPU.
 
     Args:
         model: LLaDA model (or LoRA-merged model).
@@ -97,6 +108,7 @@ def generate_completion(
         remasking: 'low_confidence' or 'random'.
         stop_sequences: List of strings to truncate at. Uses defaults if None.
         num_samples: Number of completions to generate (for pass@k).
+        batch_size: Max samples to generate in parallel. Set to 1 to disable batching.
         device: 'cuda' or 'cpu'.
 
     Returns:
@@ -118,44 +130,65 @@ def generate_completion(
     M = max_new_tokens
     total_len = P + M
 
+    # Shared mask positions (same for all samples from the same prompt)
+    mask_positions = torch.zeros(total_len, dtype=torch.bool, device=device)
+    mask_positions[P:] = True
+
+    prompt_tensor = torch.tensor(prompt_ids, dtype=torch.long, device=device)
+
     completions = []
-    for sample_idx in range(num_samples):
-        # Build input: [prompt_tokens | mask_tokens]
-        input_ids = torch.full(
-            (1, total_len), mask_token_id, dtype=torch.long, device=device
-        )
-        input_ids[0, :P] = torch.tensor(prompt_ids, dtype=torch.long, device=device)
+    remaining = num_samples
+    sample_offset = 0
 
-        # Mask positions: only the appended region
-        mask_positions = torch.zeros(total_len, dtype=torch.bool, device=device)
-        mask_positions[P:] = True
+    while remaining > 0:
+        chunk = min(remaining, batch_size)
 
-        # Set seed per sample for reproducible diversity
+        # Set seed for this chunk for reproducible diversity
         if temperature > 0 and num_samples > 1:
-            torch.manual_seed(42 + sample_idx)
+            torch.manual_seed(42 + sample_offset)
             if torch.cuda.is_available():
-                torch.cuda.manual_seed(42 + sample_idx)
+                torch.cuda.manual_seed(42 + sample_offset)
 
-        # Run denoising
-        result = infill_denoise(
-            model=model,
-            input_ids=input_ids,
-            mask_positions=mask_positions,
-            mask_token_id=mask_token_id,
-            steps=steps,
-            temperature=temperature,
-            remasking=remasking,
-            return_logits=False,
+        # Build batched input: (chunk, total_len) = [prompt | masks]
+        input_ids = torch.full(
+            (chunk, total_len), mask_token_id, dtype=torch.long, device=device
         )
+        input_ids[:, :P] = prompt_tensor.unsqueeze(0).expand(chunk, -1)
 
-        # Decode only the generated region
-        gen_ids = result["predicted_ids"][0, P:].tolist()
-        gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+        if chunk == 1:
+            # Single sample — use original infill_denoise (avoids overhead)
+            result = infill_denoise(
+                model=model,
+                input_ids=input_ids,
+                mask_positions=mask_positions,
+                mask_token_id=mask_token_id,
+                steps=steps,
+                temperature=temperature,
+                remasking=remasking,
+                return_logits=False,
+            )
+            predicted = result["predicted_ids"]  # (1, seq_len)
+        else:
+            # Batched denoising
+            predicted = batch_infill_denoise(
+                model=model,
+                input_ids=input_ids,
+                mask_positions=mask_positions,
+                mask_token_id=mask_token_id,
+                steps=steps,
+                temperature=temperature,
+                remasking=remasking,
+            )  # (chunk, seq_len)
 
-        # Truncate at stop sequences
-        gen_text = truncate_at_stop(gen_text, stop_sequences)
+        # Decode each sample in the chunk
+        for b in range(chunk):
+            gen_ids = predicted[b, P:].tolist()
+            gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+            gen_text = truncate_at_stop(gen_text, stop_sequences)
+            completions.append(gen_text)
 
-        completions.append(gen_text)
+        remaining -= chunk
+        sample_offset += chunk
 
     return completions
 
@@ -177,6 +210,7 @@ def generate_completion_instruct(
     remasking: str = "low_confidence",
     stop_sequences: Optional[List[str]] = None,
     num_samples: int = 1,
+    batch_size: int = DEFAULT_BATCH_SIZE,
     device: str = "cuda",
 ) -> List[str]:
     """
@@ -209,6 +243,7 @@ def generate_completion_instruct(
         remasking=remasking,
         stop_sequences=stop_sequences,
         num_samples=num_samples,
+        batch_size=batch_size,
         device=device,
     )
 
