@@ -1,17 +1,17 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-benchmark-mbpp
+  name: mdlm-benchmark-base-humaneval
   labels:
     app: mdlm-code-fixer
-    task: benchmark
+    task: benchmark-base-mbpp
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
         app: mdlm-code-fixer
-        task: benchmark
+        task: benchmark-base
     spec:
       restartPolicy: Never
       containers:
@@ -29,15 +29,15 @@ spec:
             cd /workspace/mdlm-bug-fixer &&
             git checkout main &&
 
-            echo "=== MBPP (LoRA, 5 samples) ===" &&
+            echo "=== MBPP (base model, 5 samples) ===" &&
             python run_evalplus.py \
-              --benchmark mbpp \
-              --adapter-path /outputs/run2/llada_lora/lora_adapter \
+              --benchmark humaneval \
+              --no-adapter \
               --num-samples 5 \
               --steps 128 \
               --temperature 0.5 \
               --batch-size 4 \
-              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_lora_pass1.log
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/humaneval_base.log
 
         resources:
           limits:
