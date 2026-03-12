@@ -60,11 +60,14 @@ def resolve_mask_token_id(tokenizer, model: Optional[torch.nn.Module] = None) ->
 # Stop-Sequence Truncation
 # ============================================================
 DEFAULT_STOP_SEQUENCES = [
-    "\ndef ",
     "\nclass ",
     "\n\n\n",
     "\nif __name__",
 ]
+
+# For prompts that already contain a function definition (e.g., HumanEval),
+# we also stop at a second "\ndef " to avoid generating extra functions.
+STOP_SEQUENCES_WITH_DEF = DEFAULT_STOP_SEQUENCES + ["\ndef "]
 
 
 def truncate_at_stop(text: str, stop_sequences: List[str]) -> str:
@@ -75,6 +78,16 @@ def truncate_at_stop(text: str, stop_sequences: List[str]) -> str:
         if idx != -1 and idx < earliest:
             earliest = idx
     return text[:earliest]
+
+
+def get_stop_sequences(prompt: str, custom: Optional[List[str]] = None) -> List[str]:
+    """Pick stop sequences based on whether the prompt already has a function def."""
+    if custom is not None:
+        return custom
+    # If prompt already has a def line, stop at the next def
+    if "\ndef " in prompt or prompt.lstrip().startswith("def "):
+        return STOP_SEQUENCES_WITH_DEF
+    return DEFAULT_STOP_SEQUENCES
 
 
 # ============================================================
@@ -129,8 +142,7 @@ def generate_completion(
     if mask_token_id is None:
         mask_token_id = resolve_mask_token_id(tokenizer, model)
 
-    if stop_sequences is None:
-        stop_sequences = DEFAULT_STOP_SEQUENCES
+    stop_sequences = get_stop_sequences(prompt, stop_sequences)
 
     # Tokenize prompt, cap to avoid excessively long sequences
     MAX_PROMPT_LEN = 1536  # leave room for generation within 2048 context
