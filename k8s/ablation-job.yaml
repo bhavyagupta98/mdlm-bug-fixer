@@ -61,28 +61,51 @@ spec:
             echo "[INFO] Output directory: $OUT_DIR"
 
             # ----------------------------------------------------------
-            # Train LLaDA LoRA on TRAIN_RECORDS base records and persist
-            # the adapter to the PVC so ablations and the SWE benchmark
-            # can reuse the same weights across separate jobs.
+            # Resolve LoRA adapter from Hugging Face.
             # ----------------------------------------------------------
-            TRAIN_RECORDS="${TRAIN_RECORDS:-2000}"
-            echo "[TRAIN] Fine-tuning LoRA on ${TRAIN_RECORDS} records (bf16, max-seq-len=${MAX_SEQ_LEN})..."
-            python model.py \
-              --max-records "${TRAIN_RECORDS}" \
-              --use-bf16 \
-              --max-seq-len "${MAX_SEQ_LEN}" \
-              2>&1 | tee "${OUT_DIR}/train.log"
-            echo "[TRAIN] Training complete."
-
             ADAPTER_PATH="${ADAPTER_PATH:-/outputs/runs/llada_lora/lora_adapter}"
-            echo "[TRAIN] Persisting LoRA adapter to PVC (${ADAPTER_PATH})..."
+
+            HF_ADAPTER_REPO="${HF_ADAPTER_REPO:-Kkuntal990/mdlm-bug-fixer}"
+            HF_ADAPTER_REVISION="${HF_ADAPTER_REVISION:-main}"
+            HF_ADAPTER_TMP_DIR="/outputs/runs/llada_lora/hf_download"
+
+            echo "[SETUP] Downloading pretrained LoRA adapter from ${HF_ADAPTER_REPO}@${HF_ADAPTER_REVISION}..."
+            mkdir -p /outputs/runs/llada_lora
+            rm -rf "$HF_ADAPTER_TMP_DIR"
+            python - <<'PY'
+            from huggingface_hub import snapshot_download
+            import os
+
+            repo_id = os.environ.get("HF_ADAPTER_REPO", "Kkuntal990/mdlm-bug-fixer")
+            revision = os.environ.get("HF_ADAPTER_REVISION", "main")
+            local_dir = os.environ.get("HF_ADAPTER_TMP_DIR", "/outputs/runs/llada_lora/hf_download")
+            token = os.environ.get("HF_TOKEN")
+
+            snapshot_download(
+              repo_id=repo_id,
+              revision=revision,
+              local_dir=local_dir,
+              local_dir_use_symlinks=False,
+              token=token,
+            )
+            print(f"[INFO] Downloaded adapter repository to {local_dir}")
+            PY
+
+            if [ -f "$HF_ADAPTER_TMP_DIR/adapter_config.json" ]; then
+              RESOLVED_HF_ADAPTER_PATH="$HF_ADAPTER_TMP_DIR"
+            elif [ -f "$HF_ADAPTER_TMP_DIR/lora_adapter/adapter_config.json" ]; then
+              RESOLVED_HF_ADAPTER_PATH="$HF_ADAPTER_TMP_DIR/lora_adapter"
+            else
+              echo "[ERROR] Could not find adapter_config.json in downloaded repo."
+              echo "        Checked: $HF_ADAPTER_TMP_DIR and $HF_ADAPTER_TMP_DIR/lora_adapter"
+              exit 1
+            fi
+
+            echo "[SETUP] Persisting downloaded adapter to ${ADAPTER_PATH}..."
             mkdir -p "$(dirname "$ADAPTER_PATH")"
             rm -rf "$ADAPTER_PATH"
-            cp -r /workspace/mdlm-bug-fixer/runs/llada_lora/lora_adapter "$ADAPTER_PATH"
-            echo "[TRAIN] Adapter saved: ${ADAPTER_PATH}"
-
-            # Use the freshly trained PVC-persisted adapter for all ablations
-            echo "[INFO] Using LoRA adapter: $ADAPTER_PATH"
+            cp -r "$RESOLVED_HF_ADAPTER_PATH" "$ADAPTER_PATH"
+            echo "[INFO] Using downloaded LoRA adapter: $ADAPTER_PATH"
 
             # ----------------------------------------------------------
             # Run ablation studies
@@ -178,18 +201,19 @@ spec:
         - name: RUN_TAG
           value: "ablation_run"
 
-        # ── Paths (resolved against the PVC mount at /outputs) ──────────
+        # Pretrained LoRA repo settings (used for ablations)
+        - name: HF_ADAPTER_REPO
+          value: "Kkuntal990/mdlm-bug-fixer"
+        - name: HF_ADAPTER_REVISION
+          value: "main"
 
-        # Number of base records to train on.
-        # The training step runs first and writes the adapter to /outputs.
-        - name: TRAIN_RECORDS
-          value: "2000"
+        # ── Paths (resolved against the PVC mount at /outputs) ──────────
 
         # Path to processed_train.jsonl.gz (ships with the cloned repo).
         - name: DATA_PATH
           value: "/workspace/mdlm-bug-fixer/processed_train.jsonl.gz"
 
-        # Adapter path written by the training step above to the PVC.
+        # Adapter destination on PVC for downloaded pretrained weights.
         # Ablations and the SWE benchmark read from this shared location.
         - name: ADAPTER_PATH
           value: "/outputs/runs/llada_lora/lora_adapter"
