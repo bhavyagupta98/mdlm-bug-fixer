@@ -427,6 +427,94 @@ def evaluate_instance(
 # ============================================================
 # Generative Mode Evaluation (prompt + buggy code, no masking hints)
 # ============================================================
+def _is_causal_lm(model: torch.nn.Module) -> bool:
+    """
+    Return True if the model is a standard causal LM (e.g. Llama, Mistral)
+    rather than a masked-diffusion model like LLaDA.
+    LLaDA exposes mask_token_id in its config; causal LMs do not.
+    """
+    config = getattr(model, "config", None)
+    return getattr(config, "mask_token_id", None) is None
+
+
+def evaluate_instance_generative_causal(
+    model: torch.nn.Module,
+    tokenizer,
+    buggy_code: str,
+    fixed_code: str,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    """
+    Generative evaluation for standard causal/autoregressive LMs (e.g. Llama-2).
+    Uses model.generate() instead of infill_denoise.
+    """
+    prompt = build_repair_prompt(buggy_code, tokenizer)
+    fixed_ids = tokenizer.encode(fixed_code, add_special_tokens=False)
+
+    if args.oracle_length:
+        max_new_tokens = len(fixed_ids) + args.oracle_slack
+    else:
+        max_new_tokens = args.max_new_tokens
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=args.max_seq_len - max_new_tokens - 2,
+    ).to(args.device)
+    P = inputs["input_ids"].shape[1]
+
+    t0 = time.time()
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=(args.temperature > 0),
+            temperature=args.temperature if args.temperature > 0 else 1.0,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    elapsed = time.time() - t0
+
+    gen_ids = output_ids[0, P:].tolist()
+    pred_code_raw = tokenizer.decode(gen_ids, skip_special_tokens=True,
+                                     clean_up_tokenization_spaces=False)
+    pred_code = _extract_java_code(pred_code_raw)
+    pred_code_ids = tokenizer.encode(pred_code, add_special_tokens=False)
+
+    file_em = patch_string_exact_match(pred_code, fixed_code)
+    bleu = patch_bleu(pred_code, fixed_code)
+    ned = normalized_edit_distance(pred_code_ids, fixed_ids)
+    ed = token_edit_distance(pred_code_ids, fixed_ids)
+
+    codebleu = None
+    if args.compute_codebleu:
+        cb = compute_codebleu(pred_code, fixed_code, language="java")
+        if cb:
+            codebleu = cb.get("codebleu")
+
+    return {
+        "predicted_code": pred_code,
+        "reference_code": fixed_code,
+        "full_file_exact_match": file_em,
+        "num_hunks": None,
+        "total_masked_tokens": max_new_tokens,
+        "token_exact_match": None,
+        "per_hunk_exact": None,
+        "all_hunks_correct": None,
+        "patch_string_em": float(file_em),
+        "patch_bleu": bleu,
+        "patch_ned": ned,
+        "edit_distance": ed,
+        "single_pass_ce": None,
+        "cross_entropy_loss": None,
+        "top_k_accuracy": None,
+        "codebleu": codebleu,
+        "wall_time_sec": elapsed,
+        "prompt_tokens": P,
+        "generated_tokens": len(gen_ids),
+    }
+
+
 def evaluate_instance_generative(
     model: torch.nn.Module,
     tokenizer,
@@ -436,8 +524,9 @@ def evaluate_instance_generative(
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
     """
-    Generative evaluation: no diff-based masking. The model receives a prompt
-    containing the full buggy file and must produce the complete fixed file.
+    Generative evaluation (LLaDA masked-diffusion): no diff-based masking.
+    The model receives a prompt containing the full buggy file and must
+    produce the complete fixed file via append-and-denoise.
 
     Generation budget:
       - If --oracle-length: use len(fixed_file_tokens) + --oracle-slack
@@ -629,11 +718,13 @@ def main() -> None:
         device=args.device,
         dtype=dtype,
     )
-    mask_token_id = resolve_mask_token_id(tokenizer, model)
+    causal = _is_causal_lm(model)
+    mask_token_id = None if causal else resolve_mask_token_id(tokenizer, model)
 
     print("\n" + "=" * 60)
     print("JAVA SWE-STYLE BENCHMARK")
     print("=" * 60)
+    print(f"[INFO] Model type: {'causal LM (autoregressive)' if causal else 'masked diffusion (LLaDA)'}")
     if args.mode == "generative":
         print("[INFO] Mode: generative — prompt + full buggy file, no masking hints")
         budget = (
@@ -643,7 +734,11 @@ def main() -> None:
         )
         print(f"[INFO] Generation budget: {budget}")
     else:
-        print("[INFO] Mode: oracle-localized Defects4J file repair")
+        if causal:
+            print("[WARN] Mode: localized — not applicable for causal LMs; skipping to generative")
+            args.mode = "generative"
+        else:
+            print("[INFO] Mode: oracle-localized Defects4J file repair")
     print(f"[INFO] Model: {args.base_model}")
     print(f"[INFO] Adapter: {'base-only' if args.no_adapter else (args.adapter_path or 'base-only')}")
     print(f"[INFO] Defects4J cmd: {defects4j_cmd}")
@@ -709,11 +804,19 @@ def main() -> None:
                     if args.mode == "generative":
                         # No diff-based masking: model receives full buggy file and must
                         # generate the complete fixed file from scratch.
-                        metrics = evaluate_instance_generative(
-                            model, tokenizer, buggy_code, fixed_code, mask_token_id, args
-                        )
+                        if causal:
+                            # Standard autoregressive model (e.g. Llama-2)
+                            metrics = evaluate_instance_generative_causal(
+                                model, tokenizer, buggy_code, fixed_code, args
+                            )
+                        else:
+                            # LLaDA masked-diffusion append-and-denoise
+                            metrics = evaluate_instance_generative(
+                                model, tokenizer, buggy_code, fixed_code, mask_token_id, args
+                            )
                     else:
                         # Oracle-localized mode: diff hunks are masked, model fills them in.
+                        # Only supported for masked-diffusion models (LLaDA).
                         record = build_localized_record(
                             tokenizer=tokenizer,
                             mask_token_id=mask_token_id,

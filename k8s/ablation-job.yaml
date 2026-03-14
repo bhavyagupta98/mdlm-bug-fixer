@@ -1,0 +1,232 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ablation-study
+  labels:
+    app: mdlm-code-fixer
+    task: ablation-study
+spec:
+  backoffLimit: 0          # do not retry on failure
+  ttlSecondsAfterFinished: 7200   # clean up after 2 h
+  template:
+    metadata:
+      labels:
+        app: mdlm-code-fixer
+        task: ablation-study
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: ablation-study
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+        command:
+          - bash
+          - -c
+          - |
+            set -euo pipefail
+
+            echo "[SETUP] Installing system packages..."
+            apt-get update -qq && apt-get install -y -q git curl
+
+            echo "[SETUP] Installing Python packages..."
+            pip install --root-user-action=ignore --no-cache-dir \
+              "transformers==4.44.2" peft accelerate bitsandbytes \
+              codebleu sacrebleu
+
+            echo "[SETUP] Cloning repository (branch: ${GIT_BRANCH})..."
+            git clone --branch "${GIT_BRANCH}" --single-branch \
+              https://github.com/bhavyagupta98/mdlm-bug-fixer.git \
+              /workspace/mdlm-bug-fixer
+
+            cd /workspace/mdlm-bug-fixer
+
+            # ----------------------------------------------------------
+            # Resolve dataset path.
+            # Default: inside the cloned repo (ships with the codebase).
+            # Override DATA_PATH env var to use a PVC-mounted file instead.
+            # ----------------------------------------------------------
+            DATA_PATH="${DATA_PATH:-/workspace/mdlm-bug-fixer/processed_train.jsonl.gz}"
+            if [ ! -f "$DATA_PATH" ]; then
+              echo "[ERROR] Dataset not found at $DATA_PATH"
+              echo "        The file should be at /workspace/mdlm-bug-fixer/processed_train.jsonl.gz"
+              echo "        after cloning, or set DATA_PATH to a PVC-mounted path."
+              exit 1
+            fi
+            echo "[INFO] Using dataset: $DATA_PATH"
+
+            # ----------------------------------------------------------
+            # Resolve adapter path.
+            # Default: inside the cloned repo's runs directory.
+            # Override ADAPTER_PATH env var to use a PVC-mounted adapter.
+            # ----------------------------------------------------------
+            ADAPTER_PATH="${ADAPTER_PATH:-/workspace/mdlm-bug-fixer/runs/llada_lora/lora_adapter}"
+            if [ ! -d "$ADAPTER_PATH" ]; then
+              echo "[WARN] LoRA adapter not found at $ADAPTER_PATH"
+              echo "       Fine-tuning ablation will compare base vs base (no LoRA)."
+              echo "       Set ADAPTER_PATH or ensure the adapter was saved to the PVC."
+            else
+              echo "[INFO] Using LoRA adapter: $ADAPTER_PATH"
+            fi
+
+            OUT_DIR="/outputs/ablations/${RUN_TAG}"
+            mkdir -p "$OUT_DIR"
+            echo "[INFO] Output directory: $OUT_DIR"
+
+            # ----------------------------------------------------------
+            # Run ablation studies
+            # ----------------------------------------------------------
+            CODEBLEU_FLAG=""
+            if [ "${ENABLE_CODEBLEU:-true}" = "true" ]; then
+              CODEBLEU_FLAG="--codebleu"
+              echo "[INFO] CodeBLEU enabled"
+            fi
+
+            echo "[STEP] Running ablation: ${ABLATION_AXIS}"
+            python run_ablations.py \
+              --ablation     "${ABLATION_AXIS}" \
+              --adapter-path "${ADAPTER_PATH}" \
+              --data-path    "${DATA_PATH}" \
+              --output-dir   "${OUT_DIR}" \
+              --max-records  "${MAX_RECORDS}" \
+              --max-seq-len  "${MAX_SEQ_LEN}" \
+              --dtype        "${DTYPE:-bfloat16}" \
+              ${CODEBLEU_FLAG} \
+              2>&1 | tee "${OUT_DIR}/ablation.log"
+
+            echo ""
+            echo "══════════════════════════════════════════════════════"
+            echo "  Ablation complete.  Results in: ${OUT_DIR}"
+            echo "══════════════════════════════════════════════════════"
+            echo ""
+            echo "Files written:"
+            ls -lh "${OUT_DIR}/" 2>/dev/null || true
+            echo ""
+            echo "LaTeX tables (copy-paste into report.tex):"
+            echo "──────────────────────────────────────────"
+            cat "${OUT_DIR}/ablation_tables.tex" 2>/dev/null || \
+              echo "(ablation_tables.tex not found — check ablation.log)"
+
+        resources:
+          limits:
+            nvidia.com/a100: "1"
+            memory: "48Gi"
+            cpu: "2"
+          requests:
+            nvidia.com/a100: "1"
+            memory: "48Gi"
+            cpu: "2"
+
+        volumeMounts:
+          - name: cache-volume
+            mountPath: /cache
+          - name: outputs-volume
+            mountPath: /outputs
+          - name: dev-shm
+            mountPath: /dev/shm
+
+        env:
+        # ── Authentication ──────────────────────────────────────────────
+        # Create the secret first:
+        #   kubectl create secret generic hf-token --from-literal=token=<your_token>
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: false
+
+        # ── Repository ──────────────────────────────────────────────────
+        - name: GIT_BRANCH
+          value: "final2"
+
+        # ── Ablation configuration ───────────────────────────────────────
+        # ABLATION_AXIS: all | steps | remasking | finetuning
+        - name: ABLATION_AXIS
+          value: "all"
+
+        # Number of test records to evaluate per configuration.
+        # 200 is a good balance between statistical reliability and runtime.
+        # Use 5 for a quick smoke-test before a full run.
+        - name: MAX_RECORDS
+          value: "200"
+
+        - name: MAX_SEQ_LEN
+          value: "2048"
+
+        # Set to "false" to skip CodeBLEU (faster, but less informative)
+        - name: ENABLE_CODEBLEU
+          value: "true"
+
+        # Floating-point precision: "bfloat16" or "float32"
+        - name: DTYPE
+          value: "bfloat16"
+
+        # Timestamped run tag — override to group runs logically
+        # e.g. "run_20260314" or "final_ablation"
+        - name: RUN_TAG
+          value: "ablation_run"
+
+        # ── Paths (resolved against the PVC mount at /outputs) ──────────
+        # Path to processed_train.jsonl.gz (default: cloned repo path)
+        # Override to a PVC-mounted path if the file lives on a PVC.
+        - name: DATA_PATH
+          value: "/workspace/mdlm-bug-fixer/processed_train.jsonl.gz"
+
+        # Path to saved LoRA adapter (default: cloned repo runs/ directory)
+        # Override to a PVC-mounted path if the adapter lives on a PVC.
+        - name: ADAPTER_PATH
+          value: "/workspace/mdlm-bug-fixer/runs/llada_lora/lora_adapter"
+
+        # ── HuggingFace / cache directories ─────────────────────────────
+        - name: HF_HOME
+          value: "/cache/hf"
+        - name: TRANSFORMERS_CACHE
+          value: "/cache/hf/transformers"
+        - name: HF_DATASETS_CACHE
+          value: "/cache/hf/datasets"
+        - name: TORCH_HOME
+          value: "/cache/torch"
+        - name: PIP_CACHE_DIR
+          value: "/cache/pip"
+
+        # ── Python / CUDA ────────────────────────────────────────────────
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+
+      tolerations:
+        - key: nautilus.io/reservation
+          operator: Exists
+          effect: NoSchedule
+        - effect: NoSchedule
+          key: nautilus.io/hardware
+          operator: Equal
+          value: large-gpu
+        - effect: PreferNoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        - key: nautilus.io/issue
+          operator: Exists
+          effect: NoSchedule
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                - NVIDIA-A100-SXM4-80GB
+
+      volumes:
+        - name: cache-volume
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: outputs-volume
+          persistentVolumeClaim:
+            claimName: bgupta-pvc
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

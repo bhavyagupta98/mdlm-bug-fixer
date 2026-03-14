@@ -60,13 +60,14 @@ spec:
             mountPath: /dev/shm
 
         env:
-        # HuggingFace token (required for gated models)
+        # HuggingFace token (REQUIRED — meta-llama/Llama-2-7b-chat is gated)
+        # Create the secret first: kubectl create secret generic hf-token --from-literal=token=<your_token>
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
               name: hf-token
               key: token
-              optional: true
+              optional: false
 
         # Benchmark parameters (override via Job env or kubectl)
         - name: PROJECTS
