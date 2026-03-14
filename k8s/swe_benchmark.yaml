@@ -57,14 +57,16 @@ spec:
             ADAPTER_LOCAL_DIR="${HF_ADAPTER_LOCAL_DIR:-/outputs/runs/llada_lora/hf_download}"
             ADAPTER_DEST="${ADAPTER_PATH:-/outputs/runs/llada_lora/lora_adapter}"
 
-            if [ -f "$ADAPTER_LOCAL_DIR/adapter_config.json" ]; then
-              RESOLVED_ADAPTER_SRC="$ADAPTER_LOCAL_DIR"
-            elif [ -f "$ADAPTER_LOCAL_DIR/lora_adapter/adapter_config.json" ]; then
-              RESOLVED_ADAPTER_SRC="$ADAPTER_LOCAL_DIR/lora_adapter"
-            else
+            ADAPTER_CONFIG_PATH="$(find "$ADAPTER_LOCAL_DIR" -type f -name adapter_config.json | head -n 1 || true)"
+            if [ -z "$ADAPTER_CONFIG_PATH" ]; then
               echo "[ERROR] Could not find adapter_config.json in downloaded repo."
+              echo "        Searched recursively under: $ADAPTER_LOCAL_DIR"
+              echo "[DEBUG] Top-level files in downloaded repo:"
+              find "$ADAPTER_LOCAL_DIR" -maxdepth 2 -type f | head -n 30 || true
               exit 1
             fi
+            RESOLVED_ADAPTER_SRC="$(dirname "$ADAPTER_CONFIG_PATH")"
+            echo "[INFO] Resolved adapter directory: $RESOLVED_ADAPTER_SRC"
 
             mkdir -p "$(dirname "$ADAPTER_DEST")"
             rm -rf "$ADAPTER_DEST"

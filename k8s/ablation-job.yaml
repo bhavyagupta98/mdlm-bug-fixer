@@ -91,15 +91,16 @@ spec:
             print(f"[INFO] Downloaded adapter repository to {local_dir}")
             PY
 
-            if [ -f "$HF_ADAPTER_TMP_DIR/adapter_config.json" ]; then
-              RESOLVED_HF_ADAPTER_PATH="$HF_ADAPTER_TMP_DIR"
-            elif [ -f "$HF_ADAPTER_TMP_DIR/lora_adapter/adapter_config.json" ]; then
-              RESOLVED_HF_ADAPTER_PATH="$HF_ADAPTER_TMP_DIR/lora_adapter"
-            else
+            ADAPTER_CONFIG_PATH="$(find "$HF_ADAPTER_TMP_DIR" -type f -name adapter_config.json | head -n 1 || true)"
+            if [ -z "$ADAPTER_CONFIG_PATH" ]; then
               echo "[ERROR] Could not find adapter_config.json in downloaded repo."
-              echo "        Checked: $HF_ADAPTER_TMP_DIR and $HF_ADAPTER_TMP_DIR/lora_adapter"
+              echo "        Searched recursively under: $HF_ADAPTER_TMP_DIR"
+              echo "[DEBUG] Top-level files in downloaded repo:"
+              find "$HF_ADAPTER_TMP_DIR" -maxdepth 2 -type f | head -n 30 || true
               exit 1
             fi
+            RESOLVED_HF_ADAPTER_PATH="$(dirname "$ADAPTER_CONFIG_PATH")"
+            echo "[INFO] Resolved adapter directory: $RESOLVED_HF_ADAPTER_PATH"
 
             echo "[SETUP] Persisting downloaded adapter to ${ADAPTER_PATH}..."
             mkdir -p "$(dirname "$ADAPTER_PATH")"
