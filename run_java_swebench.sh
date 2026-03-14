@@ -29,7 +29,7 @@ ADAPTER_PATH="${ADAPTER_PATH:-$ROOT_DIR/runs/llada_lora/lora_adapter}"
 # ================================================================
 declare -A MODEL_IDS=(
   ["llada"]="GSAI-ML/LLaDA-8B-Instruct"
-  ["llama"]="meta-llama/Llama-2-7b-chat"
+  ["llama"]="meta-llama/Llama-2-7b-chat-hf"
 )
 
 declare -A HAS_ADAPTER=(
