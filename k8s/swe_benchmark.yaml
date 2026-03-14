@@ -75,6 +75,11 @@ spec:
         - name: BUG_LIMIT
           value: "10"
 
+        # LoRA adapter trained and persisted to PVC by ablation-job.yaml.
+        # run_java_swebench.sh uses this when ADAPTER_LABEL=finetuned.
+        - name: ADAPTER_PATH
+          value: "/outputs/runs/llada_lora/lora_adapter"
+
         # Cache directories
         - name: HF_HOME
           value: "/cache/hf"

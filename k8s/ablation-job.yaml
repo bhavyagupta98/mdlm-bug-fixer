@@ -54,22 +54,35 @@ spec:
             echo "[INFO] Using dataset: $DATA_PATH"
 
             # ----------------------------------------------------------
-            # Resolve adapter path.
-            # Default: inside the cloned repo's runs directory.
-            # Override ADAPTER_PATH env var to use a PVC-mounted adapter.
+            # Create output directory early so the training log can go here
             # ----------------------------------------------------------
-            ADAPTER_PATH="${ADAPTER_PATH:-/workspace/mdlm-bug-fixer/runs/llada_lora/lora_adapter}"
-            if [ ! -d "$ADAPTER_PATH" ]; then
-              echo "[WARN] LoRA adapter not found at $ADAPTER_PATH"
-              echo "       Fine-tuning ablation will compare base vs base (no LoRA)."
-              echo "       Set ADAPTER_PATH or ensure the adapter was saved to the PVC."
-            else
-              echo "[INFO] Using LoRA adapter: $ADAPTER_PATH"
-            fi
-
             OUT_DIR="/outputs/ablations/${RUN_TAG}"
             mkdir -p "$OUT_DIR"
             echo "[INFO] Output directory: $OUT_DIR"
+
+            # ----------------------------------------------------------
+            # Train LLaDA LoRA on TRAIN_RECORDS base records and persist
+            # the adapter to the PVC so ablations and the SWE benchmark
+            # can reuse the same weights across separate jobs.
+            # ----------------------------------------------------------
+            TRAIN_RECORDS="${TRAIN_RECORDS:-2000}"
+            echo "[TRAIN] Fine-tuning LoRA on ${TRAIN_RECORDS} records (bf16, max-seq-len=${MAX_SEQ_LEN})..."
+            python model.py \
+              --max-records "${TRAIN_RECORDS}" \
+              --use-bf16 \
+              --max-seq-len "${MAX_SEQ_LEN}" \
+              2>&1 | tee "${OUT_DIR}/train.log"
+            echo "[TRAIN] Training complete."
+
+            ADAPTER_PATH="${ADAPTER_PATH:-/outputs/runs/llada_lora/lora_adapter}"
+            echo "[TRAIN] Persisting LoRA adapter to PVC (${ADAPTER_PATH})..."
+            mkdir -p "$(dirname "$ADAPTER_PATH")"
+            rm -rf "$ADAPTER_PATH"
+            cp -r /workspace/mdlm-bug-fixer/runs/llada_lora/lora_adapter "$ADAPTER_PATH"
+            echo "[TRAIN] Adapter saved: ${ADAPTER_PATH}"
+
+            # Use the freshly trained PVC-persisted adapter for all ablations
+            echo "[INFO] Using LoRA adapter: $ADAPTER_PATH"
 
             # ----------------------------------------------------------
             # Run ablation studies
@@ -166,15 +179,20 @@ spec:
           value: "ablation_run"
 
         # ── Paths (resolved against the PVC mount at /outputs) ──────────
-        # Path to processed_train.jsonl.gz (default: cloned repo path)
-        # Override to a PVC-mounted path if the file lives on a PVC.
+
+        # Number of base records to train on.
+        # The training step runs first and writes the adapter to /outputs.
+        - name: TRAIN_RECORDS
+          value: "2000"
+
+        # Path to processed_train.jsonl.gz (ships with the cloned repo).
         - name: DATA_PATH
           value: "/workspace/mdlm-bug-fixer/processed_train.jsonl.gz"
 
-        # Path to saved LoRA adapter (default: cloned repo runs/ directory)
-        # Override to a PVC-mounted path if the adapter lives on a PVC.
+        # Adapter path written by the training step above to the PVC.
+        # Ablations and the SWE benchmark read from this shared location.
         - name: ADAPTER_PATH
-          value: "/workspace/mdlm-bug-fixer/runs/llada_lora/lora_adapter"
+          value: "/outputs/runs/llada_lora/lora_adapter"
 
         # ── HuggingFace / cache directories ─────────────────────────────
         - name: HF_HOME
