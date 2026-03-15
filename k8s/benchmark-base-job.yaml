@@ -37,7 +37,7 @@ spec:
               --steps 256 \
               --temperature 0 \
               --batch-size 4 \
-              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_instruct_base.log
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_base.log
 
         resources:
           limits:

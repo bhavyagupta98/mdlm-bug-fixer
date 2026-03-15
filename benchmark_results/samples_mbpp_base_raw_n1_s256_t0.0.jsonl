@@ -1,0 +1,378 @@
+{"task_id": "Mbpp/2", "completion": ""}
+{"task_id": "Mbpp/3", "completion": ""}
+{"task_id": "Mbpp/4", "completion": "import heapq\nreturn heapq.nlargest(n, numbers)"}
+{"task_id": "Mbpp/6", "completion": "def differ_At_One_Bit_Pos(a,b):"}
+{"task_id": "Mbpp/7", "completion": ""}
+{"task_id": "Mbpp/8", "completion": ""}
+{"task_id": "Mbpp/9", "completion": ""}
+{"task_id": "Mbpp/11", "completion": ""}
+{"task_id": "Mbpp/12", "completion": ""}
+{"task_id": "Mbpp/14", "completion": ""}
+{"task_id": "Mbpp/16", "completion": ""}
+{"task_id": "Mbpp/17", "completion": ""}
+{"task_id": "Mbpp/18", "completion": ""}
+{"task_id": "Mbpp/19", "completion": ""}
+{"task_id": "Mbpp/20", "completion": ""}
+{"task_id": "Mbpp/56", "completion": ""}
+{"task_id": "Mbpp/57", "completion": ""}
+{"task_id": "Mbpp/58", "completion": "def opposite_Signs(a,b):\n    return a*b<"}
+{"task_id": "Mbpp/59", "completion": ""}
+{"task_id": "Mbpp/61", "completion": ""}
+{"task_id": "Mbpp/62", "completion": ""}
+{"task_id": "Mbpp/63", "completion": ""}
+{"task_id": "Mbpp/64", "completion": ""}
+{"task_id": "Mbpp/65", "completion": ""}
+{"task_id": "Mbpp/66", "completion": ""}
+{"task_id": "Mbpp/67", "completion": "def bell_number(n):\n    pass"}
+{"task_id": "Mbpp/68", "completion": "def is_Monotonic(arr):\n    return arr == sorted(arr"}
+{"task_id": "Mbpp/69", "completion": "def is_sublist(lst, sublist):\n    pass"}
+{"task_id": "Mbpp/70", "completion": "def get_equal(tuples):\n    return True"}
+{"task_id": "Mbpp/71", "completion": ""}
+{"task_id": "Mbpp/72", "completion": ""}
+{"task_id": "Mbpp/74", "completion": ""}
+{"task_id": "Mbpp/75", "completion": ""}
+{"task_id": "Mbpp/77", "completion": "To determine if a number is divisible by 11, you can use the following approach:\n\n1. Convert the number to a string.\n2. Reverse the digits of the string.\n3. Convert the reversed string back to an integer.\n4. Subtract the reversed number from the original number.\n5. Check if the result is divisible by 11.\n\nHere's a Python function that implements this logic:\n\n```python"}
+{"task_id": "Mbpp/79", "completion": "def word_len(word):\n    return len(word)%2"}
+{"task_id": "Mbpp/80", "completion": ""}
+{"task_id": "Mbpp/82", "completion": ""}
+{"task_id": "Mbpp/84", "completion": ""}
+{"task_id": "Mbpp/85", "completion": "import math\n\u200b"}
+{"task_id": "Mbpp/86", "completion": ""}
+{"task_id": "Mbpp/87", "completion": ""}
+{"task_id": "Mbpp/88", "completion": "from collections import Counter\nreturn Counter(lst)"}
+{"task_id": "Mbpp/89", "completion": ""}
+{"task_id": "Mbpp/90", "completion": "def len_log(words):\n    return len(max(words))"}
+{"task_id": "Mbpp/91", "completion": "def find_substring(l,s):"}
+{"task_id": "Mbpp/92", "completion": ""}
+{"task_id": "Mbpp/93", "completion": "def power(a, b):\n    return a ** b"}
+{"task_id": "Mbpp/94", "completion": ""}
+{"task_id": "Mbpp/95", "completion": ""}
+{"task_id": "Mbpp/96", "completion": ""}
+{"task_id": "Mbpp/97", "completion": ""}
+{"task_id": "Mbpp/98", "completion": ""}
+{"task_id": "Mbpp/99", "completion": ""}
+{"task_id": "Mbpp/100", "completion": ""}
+{"task_id": "Mbpp/101", "completion": "def kth_element(arr, k):\n    return arr[k-1]"}
+{"task_id": "Mbpp/102", "completion": ""}
+{"task_id": "Mbpp/103", "completion": ""}
+{"task_id": "Mbpp/104", "completion": ""}
+{"task_id": "Mbpp/105", "completion": ""}
+{"task_id": "Mbpp/106", "completion": ""}
+{"task_id": "Mbpp/108", "completion": "```\n\nTo merge three sorted lists into a single sorted list, you can use a three-pointer technique. Here's a step-by-step approach:\n\n1. Initialize three pointers, one for each list.\n2. Compare the elements at the current pointers and append the smallest element to the result list.\n3. Continue this process until you have traversed all elements in one of the lists.\n\nHere's the function to achieve this:\n\n```python"}
+{"task_id": "Mbpp/109", "completion": "def odd_Equivalent(s, n):\n"}
+{"task_id": "Mbpp/111", "completion": ""}
+{"task_id": "Mbpp/113", "completion": ""}
+{"task_id": "Mbpp/116", "completion": ""}
+{"task_id": "Mbpp/118", "completion": "def string_to_list(s):\n    return s.split()"}
+{"task_id": "Mbpp/119", "completion": ""}
+{"task_id": "Mbpp/120", "completion": ""}
+{"task_id": "Mbpp/123", "completion": ""}
+{"task_id": "Mbpp/124", "completion": ""}
+{"task_id": "Mbpp/125", "completion": ""}
+{"task_id": "Mbpp/126", "completion": ""}
+{"task_id": "Mbpp/127", "completion": "def multiply_int(a,b):\n    return a*b"}
+{"task_id": "Mbpp/128", "completion": ""}
+{"task_id": "Mbpp/129", "completion": "To determine if a given matrix is a magic square, we need to check if the sum of the elements in each row, each column, and each of the two main diagonals are the same. Here\n"}
+{"task_id": "Mbpp/130", "completion": ""}
+{"task_id": "Mbpp/131", "completion": ""}
+{"task_id": "Mbpp/132", "completion": ""}
+{"task_id": "Mbpp/133", "completion": ""}
+{"task_id": "Mbpp/135", "completion": ""}
+{"task_id": "Mbpp/137", "completion": ""}
+{"task_id": "Mbpp/138", "completion": ""}
+{"task_id": "Mbpp/139", "completion": ""}
+{"task_id": "Mbpp/140", "completion": ""}
+{"task_id": "Mbpp/141", "completion": "def pancake_sort(arr):\n    pass"}
+{"task_id": "Mbpp/142", "completion": ""}
+{"task_id": "Mbpp/145", "completion": ""}
+{"task_id": "Mbpp/160", "completion": "def find_solution(a, b, n):\n    pass"}
+{"task_id": "Mbpp/161", "completion": ""}
+{"task_id": "Mbpp/162", "completion": ""}
+{"task_id": "Mbpp/165", "completion": ""}
+{"task_id": "Mbpp/166", "completion": "def find_even_pair(arr):\n pass"}
+{"task_id": "Mbpp/167", "completion": ""}
+{"task_id": "Mbpp/168", "completion": ""}
+{"task_id": "Mbpp/170", "completion": ""}
+{"task_id": "Mbpp/171", "completion": ""}
+{"task_id": "Mbpp/172", "completion": ""}
+{"task_id": "Mbpp/222", "completion": "def check_type(t):\n    pass"}
+{"task_id": "Mbpp/223", "completion": "```\n\nTo determine if a given element is the majority element in a sorted array, we can use the Boyer-Moore Voting Algorithm. This algorithm is efficient and works in O(n) time complexity. Here's how you can implement it in Python:\n\n```python"}
+{"task_id": "Mbpp/224", "completion": "def count_Set_Bits(n):\n    return n.bit_length()"}
+{"task_id": "Mbpp/226", "completion": ""}
+{"task_id": "Mbpp/227", "completion": ""}
+{"task_id": "Mbpp/230", "completion": "def replace_blank(string,char):\n    return string.replace(\" \", char)"}
+{"task_id": "Mbpp/232", "completion": ""}
+{"task_id": "Mbpp/233", "completion": ""}
+{"task_id": "Mbpp/234", "completion": ""}
+{"task_id": "Mbpp/235", "completion": "\n"}
+{"task_id": "Mbpp/237", "completion": ""}
+{"task_id": "Mbpp/238", "completion": ""}
+{"task_id": "Mbpp/239", "completion": ""}
+{"task_id": "Mbpp/240", "completion": ""}
+{"task_id": "Mbpp/242", "completion": "def count_charac(s):\n    return len(s)"}
+{"task_id": "Mbpp/244", "completion": ""}
+{"task_id": "Mbpp/245", "completion": ""}
+{"task_id": "Mbpp/247", "completion": ""}
+{"task_id": "Mbpp/250", "completion": ""}
+{"task_id": "Mbpp/251", "completion": "def insert_element(lst, element):\n    return [element] + lst"}
+{"task_id": "Mbpp/252", "completion": ""}
+{"task_id": "Mbpp/253", "completion": "def count_integer(lst):\n    return sum(isinstance(int, lst))"}
+{"task_id": "Mbpp/255", "completion": ""}
+{"task_id": "Mbpp/256", "completion": ""}
+{"task_id": "Mbpp/257", "completion": "def swap_numbers(a,b):\n    return (b,a)"}
+{"task_id": "Mbpp/259", "completion": ""}
+{"task_id": "Mbpp/260", "completion": ""}
+{"task_id": "Mbpp/261", "completion": ""}
+{"task_id": "Mbpp/262", "completion": "def split_two_parts(list, L):\n    return list[:L], list[L:]"}
+{"task_id": "Mbpp/264", "completion": ""}
+{"task_id": "Mbpp/265", "completion": ""}
+{"task_id": "Mbpp/266", "completion": ""}
+{"task_id": "Mbpp/267", "completion": ""}
+{"task_id": "Mbpp/268", "completion": "def find_star_num(n):\n    return 37"}
+{"task_id": "Mbpp/269", "completion": "def ascii_value(c):\n   "}
+{"task_id": "Mbpp/270", "completion": "def sum_even_and_even_index(arr):\n pass"}
+{"task_id": "Mbpp/271", "completion": ""}
+{"task_id": "Mbpp/272", "completion": ""}
+{"task_id": "Mbpp/273", "completion": ""}
+{"task_id": "Mbpp/274", "completion": ""}
+{"task_id": "Mbpp/276", "completion": ""}
+{"task_id": "Mbpp/277", "completion": "def dict_filter(d, n):\n    return d"}
+{"task_id": "Mbpp/278", "completion": ""}
+{"task_id": "Mbpp/279", "completion": ""}
+{"task_id": "Mbpp/280", "completion": "def sequential_search(array, element):\n    pass"}
+{"task_id": "Mbpp/281", "completion": "def all_unique(lst):\n    return len(set(lst))"}
+{"task_id": "Mbpp/282", "completion": "def sub_list(a,b):\n    return a-b"}
+{"task_id": "Mbpp/283", "completion": ""}
+{"task_id": "Mbpp/284", "completion": "def check_element(lst, element):\n    pass"}
+{"task_id": "Mbpp/285", "completion": ""}
+{"task_id": "Mbpp/286", "completion": ""}
+{"task_id": "Mbpp/287", "completion": ""}
+{"task_id": "Mbpp/290", "completion": ""}
+{"task_id": "Mbpp/292", "completion": ""}
+{"task_id": "Mbpp/293", "completion": ""}
+{"task_id": "Mbpp/294", "completion": "def max_val(lst):\n    return max(lst)"}
+{"task_id": "Mbpp/296", "completion": "def get_Inv_Count(arr):\n    n = len(arr)\n   "}
+{"task_id": "Mbpp/297", "completion": ""}
+{"task_id": "Mbpp/299", "completion": "def max_aggregateaggregate_list):"}
+{"task_id": "Mbpp/300", "completion": "\nimport math\n"}
+{"task_id": "Mbpp/301", "completion": ""}
+{"task_id": "Mbpp/305", "completion": "pass"}
+{"task_id": "Mbpp/306", "completion": "\nTo solve this problem, we need to find the maximum sum of an increasing subsequence from the prefix until the ith index and also including the given kth element which is after i, i.e., k > i.\n\nHere's a step-by-step approach to solve this problem:\n\n1. **Calculate the prefix sum until the ith index.**\n2. **"}
+{"task_id": "Mbpp/308", "completion": ""}
+{"task_id": "Mbpp/309", "completion": ""}
+{"task_id": "Mbpp/310", "completion": ""}
+{"task_id": "Mbpp/311", "completion": "def set_left_most_unset_bit(n):\n    return n | 1"}
+{"task_id": "Mbpp/312", "completion": ""}
+{"task_id": "Mbpp/388", "completion": ""}
+{"task_id": "Mbpp/389", "completion": ""}
+{"task_id": "Mbpp/390", "completion": "def add_string(lst, fmt):\n return [fmt.format(i) for i in lst]"}
+{"task_id": "Mbpp/391", "completion": ""}
+{"task_id": "Mbpp/392", "completion": ""}
+{"task_id": "Mbpp/394", "completion": "def check_distinct(t):\n    return len(t) == len(t)"}
+{"task_id": "Mbpp/395", "completion": ""}
+{"task_id": "Mbpp/397", "completion": ""}
+{"task_id": "Mbpp/398", "completion": ""}
+{"task_id": "Mbpp/404", "completion": ""}
+{"task_id": "Mbpp/405", "completion": ""}
+{"task_id": "Mbpp/406", "completion": ""}
+{"task_id": "Mbpp/409", "completion": ""}
+{"task_id": "Mbpp/410", "completion": ""}
+{"task_id": "Mbpp/412", "completion": "def remove_odd(lst):\n    return lst"}
+{"task_id": "Mbpp/413", "completion": ""}
+{"task_id": "Mbpp/414", "completion": ""}
+{"task_id": "Mbpp/415", "completion": "def max_Product(arr):\n    pass"}
+{"task_id": "Mbpp/418", "completion": ""}
+{"task_id": "Mbpp/419", "completion": ""}
+{"task_id": "Mbpp/420", "completion": ""}
+{"task_id": "Mbpp/421", "completion": "def concatenate_tuple(tup):\n    pass"}
+{"task_id": "Mbpp/422", "completion": ""}
+{"task_id": "Mbpp/424", "completion": "def extract_rear(tuple):\n    return tuple[-1]"}
+{"task_id": "Mbpp/425", "completion": "def count_element_in_list(lst, element):\n    return sum(element in sublist for element in lst)"}
+{"task_id": "Mbpp/426", "completion": "return [i for i in numbers if i%2!=0]"}
+{"task_id": "Mbpp/427", "completion": ""}
+{"task_id": "Mbpp/428", "completion": ""}
+{"task_id": "Mbpp/429", "completion": ""}
+{"task_id": "Mbpp/430", "completion": ""}
+{"task_id": "Mbpp/432", "completion": "def median_trapezium(a,b,c):\n    return b"}
+{"task_id": "Mbpp/433", "completion": ""}
+{"task_id": "Mbpp/435", "completion": ""}
+{"task_id": "Mbpp/436", "completion": ""}
+{"task_id": "Mbpp/437", "completion": ""}
+{"task_id": "Mbpp/439", "completion": ""}
+{"task_id": "Mbpp/440", "completion": ""}
+{"task_id": "Mbpp/441", "completion": ""}
+{"task_id": "Mbpp/445", "completion": ""}
+{"task_id": "Mbpp/446", "completion": ""}
+{"task_id": "Mbpp/447", "completion": "return [x**3 for i in lst]"}
+{"task_id": "Mbpp/448", "completion": ""}
+{"task_id": "Mbpp/450", "completion": "def extract_string(string_list, size):\n    pass"}
+{"task_id": "Mbpp/451", "completion": ""}
+{"task_id": "Mbpp/453", "completion": ""}
+{"task_id": "Mbpp/454", "completion": ""}
+{"task_id": "Mbpp/455", "completion": "def check_monthnumb_number(month):\n\n    pass"}
+{"task_id": "Mbpp/456", "completion": "def reverse_string_list(lst):\n return [s[::-1] for s in lst]"}
+{"task_id": "Mbpp/457", "completion": ""}
+{"task_id": "Mbpp/458", "completion": ""}
+{"task_id": "Mbpp/459", "completion": ""}
+{"task_id": "Mbpp/460", "completion": "def Extract(lst):\n    return [x[0] for x in lst]"}
+{"task_id": "Mbpp/462", "completion": ""}
+{"task_id": "Mbpp/463", "completion": ""}
+{"task_id": "Mbpp/465", "completion": ""}
+{"task_id": "Mbpp/468", "completion": ""}
+{"task_id": "Mbpp/470", "completion": ""}
+{"task_id": "Mbpp/471", "completion": ""}
+{"task_id": "Mbpp/472", "completion": ""}
+{"task_id": "Mbpp/473", "completion": ""}
+{"task_id": "Mbpp/474", "completion": "def replace_char(s,old,new):\n    return s.replace(old,new)"}
+{"task_id": "Mbpp/475", "completion": ""}
+{"task_id": "Mbpp/476", "completion": "def big_sum(arr):\n    return max(arr) + min(arr)"}
+{"task_id": "Mbpp/477", "completion": "def is_lower(s):\n    return s.lower()"}
+{"task_id": "Mbpp/478", "completion": ""}
+{"task_id": "Mbpp/479", "completion": ""}
+{"task_id": "Mbpp/554", "completion": "def Split(arr):\n    return"}
+{"task_id": "Mbpp/555", "completion": ""}
+{"task_id": "Mbpp/556", "completion": ""}
+{"task_id": "Mbpp/557", "completion": ""}
+{"task_id": "Mbpp/558", "completion": ""}
+{"task_id": "Mbpp/559", "completion": ""}
+{"task_id": "Mbpp/560", "completion": "def union_elements(t1, t2):\n    return sorted(set(t1 + t2))"}
+{"task_id": "Mbpp/562", "completion": ""}
+{"task_id": "Mbpp/563", "completion": ""}
+{"task_id": "Mbpp/564", "completion": ""}
+{"task_id": "Mbpp/565", "completion": "def split(s):\n    return list(s)"}
+{"task_id": "Mbpp/566", "completion": ""}
+{"task_id": "Mbpp/567", "completion": "def issort_list(l):\n    return True"}
+{"task_id": "Mbpp/568", "completion": "def empty_list(n):\n    return [{} for _ in range(N)]"}
+{"task_id": "Mbpp/569", "completion": ""}
+{"task_id": "Mbpp/572", "completion": ""}
+{"task_id": "Mbpp/573", "completion": ""}
+{"task_id": "Mbpp/576", "completion": ""}
+{"task_id": "Mbpp/577", "completion": "def last_Digit_Factorial(n):\n    return 4"}
+{"task_id": "Mbpp/578", "completion": ""}
+{"task_id": "Mbpp/579", "completion": ""}
+{"task_id": "Mbpp/580", "completion": "def extract_even(t):\n    pass"}
+{"task_id": "Mbpp/581", "completion": ""}
+{"task_id": "Mbpp/583", "completion": ""}
+{"task_id": "Mbpp/585", "completion": ""}
+{"task_id": "Mbpp/586", "completion": ""}
+{"task_id": "Mbpp/587", "completion": "def list_tuple(lst):\n    return tuple(lst)"}
+{"task_id": "Mbpp/588", "completion": "def big_diff(arr):\n    return max(arr) - min(arr)"}
+{"task_id": "Mbpp/589", "completion": ""}
+{"task_id": "Mbpp/590", "completion": ""}
+{"task_id": "Mbpp/591", "completion": "def swap_List(lst):\n    return lst[::-1]"}
+{"task_id": "Mbpp/592", "completion": ""}
+{"task_id": "Mbpp/593", "completion": ""}
+{"task_id": "Mbpp/594", "completion": "def diff_even_odd(arr):\n pass"}
+{"task_id": "Mbpp/596", "completion": "import sys"}
+{"task_id": "Mbpp/597", "completion": ""}
+{"task_id": "Mbpp/598", "completion": "def armstrong_number(n):\n    pass"}
+{"task_id": "Mbpp/599", "completion": ""}
+{"task_id": "Mbpp/600", "completion": ""}
+{"task_id": "Mbpp/602", "completion": ""}
+{"task_id": "Mbpp/603", "completion": "def get_ludic(n):\n    return list(range(n))"}
+{"task_id": "Mbpp/604", "completion": "def reverse_words(s):\n    return s.split()"}
+{"task_id": "Mbpp/605", "completion": "def prime_num(n):\n    if n<1: return False"}
+{"task_id": "Mbpp/606", "completion": ""}
+{"task_id": "Mbpp/607", "completion": "import re\n"}
+{"task_id": "Mbpp/608", "completion": ""}
+{"task_id": "Mbpp/610", "completion": ""}
+{"task_id": "Mbpp/611", "completion": ""}
+{"task_id": "Mbpp/612", "completion": ""}
+{"task_id": "Mbpp/614", "completion": ""}
+{"task_id": "Mbpp/615", "completion": ""}
+{"task_id": "Mbpp/616", "completion": "def tuple_modulo(t1, t2):\n    pass"}
+{"task_id": "Mbpp/618", "completion": ""}
+{"task_id": "Mbpp/619", "completion": ""}
+{"task_id": "Mbpp/620", "completion": "\nTo solve this problem, we need to find the largest subset of numbers such that every pair of numbers in the subset is divisible by each other. This means that for any two numbers in the subset, their greatest common divisor (GCD) should be 1.\n\nHere's a step-by-step approach to solve this problem:\n\n1. **Sort the list**: Sorting helps in"}
+{"task_id": "Mbpp/622", "completion": ""}
+{"task_id": "Mbpp/623", "completion": ""}
+{"task_id": "Mbpp/624", "completion": "def is_upper(s): return s.upper"}
+{"task_id": "Mbpp/626", "completion": ""}
+{"task_id": "Mbpp/628", "completion": "def replace_spaces(s):\n    return s.replace(' ', '%20')"}
+{"task_id": "Mbpp/629", "completion": "def Split(numbers):\n    return"}
+{"task_id": "Mbpp/630", "completion": ""}
+{"task_id": "Mbpp/631", "completion": ""}
+{"task_id": "Mbpp/632", "completion": ""}
+{"task_id": "Mbpp/633", "completion": ""}
+{"task_id": "Mbpp/635", "completion": "```\n\nTo implement a function using the heap sort algorithm, we need to follow these steps:\n\n1. Build a max-heap from the input list.\n2. Extract the maximum element from the heap and move it to the end of the list.\n3. Reduce the heap size by repeat the 2 until the list is sorted.\n\nHere's the implementation of the heap sort algorithm in Python:\n\n```python"}
+{"task_id": "Mbpp/637", "completion": ""}
+{"task_id": "Mbpp/638", "completion": "\nwind_chill()"}
+{"task_id": "Mbpp/639", "completion": ""}
+{"task_id": "Mbpp/641", "completion": ""}
+{"task_id": "Mbpp/643", "completion": "def text_match_wordz_middle(word):\n    return 'z' in text"}
+{"task_id": "Mbpp/644", "completion": ""}
+{"task_id": "Mbpp/720", "completion": ""}
+{"task_id": "Mbpp/721", "completion": ""}
+{"task_id": "Mbpp/722", "completion": ""}
+{"task_id": "Mbpp/723", "completion": "def count_same_pair(a,b):"}
+{"task_id": "Mbpp/724", "completion": ""}
+{"task_id": "Mbpp/725", "completion": ""}
+{"task_id": "Mbpp/726", "completion": "def multiply_elements(t):\n    return tuple(zip(t, t))"}
+{"task_id": "Mbpp/728", "completion": ""}
+{"task_id": "Mbpp/730", "completion": ""}
+{"task_id": "Mbpp/731", "completion": "import math"}
+{"task_id": "Mbpp/732", "completion": ""}
+{"task_id": "Mbpp/733", "completion": ""}
+{"task_id": "Mbpp/734", "completion": ""}
+{"task_id": "Mbpp/735", "completion": "def toggle_middle_bits(n):\n    return n ^ 2"}
+{"task_id": "Mbpp/736", "completion": ""}
+{"task_id": "Mbpp/737", "completion": "import re"}
+{"task_id": "Mbpp/739", "completion": ""}
+{"task_id": "Mbpp/740", "completion": ""}
+{"task_id": "Mbpp/741", "completion": ""}
+{"task_id": "Mbpp/742", "completion": ""}
+{"task_id": "Mbpp/743", "completion": "def rotate_right(lst, n):\n    return lst[-n:] + lst[:-n]"}
+{"task_id": "Mbpp/744", "completion": "def check_none(tuple):\n    return None in tuple"}
+{"task_id": "Mbpp/745", "completion": ""}
+{"task_id": "Mbpp/748", "completion": ""}
+{"task_id": "Mbpp/749", "completion": ""}
+{"task_id": "Mbpp/750", "completion": "def add_tuple(lst, t):\n    return lst.extend(t)"}
+{"task_id": "Mbpp/751", "completion": "To determine if a given array represents a min heap, we need to check if it satisfies the min heap property. A min heap is a binary tree where the parent node is less than or equal to both of its children.\n\nHere's a Python function to check if a given array represents a min heap:\n\n```python"}
+{"task_id": "Mbpp/752", "completion": ""}
+{"task_id": "Mbpp/753", "completion": ""}
+{"task_id": "Mbpp/754", "completion": ""}
+{"task_id": "Mbpp/755", "completion": ""}
+{"task_id": "Mbpp/757", "completion": ""}
+{"task_id": "Mbpp/758", "completion": ""}
+{"task_id": "Mbpp/759", "completion": ""}
+{"task_id": "Mbpp/760", "completion": ""}
+{"task_id": "Mbpp/762", "completion": ""}
+{"task_id": "Mbpp/763", "completion": ""}
+{"task_id": "Mbpp/764", "completion": ""}
+{"task_id": "Mbpp/765", "completion": ""}
+{"task_id": "Mbpp/766", "completion": ""}
+{"task_id": "Mbpp/767", "completion": ""}
+{"task_id": "Mbpp/769", "completion": ""}
+{"task_id": "Mbpp/770", "completion": ""}
+{"task_id": "Mbpp/771", "completion": ""}
+{"task_id": "Mbpp/772", "completion": ""}
+{"task_id": "Mbpp/773", "completion": ""}
+{"task_id": "Mbpp/775", "completion": ""}
+{"task_id": "Mbpp/777", "completion": ""}
+{"task_id": "Mbpp/778", "completion": ""}
+{"task_id": "Mbpp/780", "completion": ""}
+{"task_id": "Mbpp/781", "completion": "\ncount_divisors()"}
+{"task_id": "Mbpp/782", "completion": ""}
+{"task_id": "Mbpp/784", "completion": "def mul_even_odd(arr):\n pass"}
+{"task_id": "Mbpp/785", "completion": "def tuple_str_int(s):\n    return tuple(map(int, s.split(',')))"}
+{"task_id": "Mbpp/786", "completion": ""}
+{"task_id": "Mbpp/787", "completion": ""}
+{"task_id": "Mbpp/788", "completion": "def new_tuple(list, string):\n    return tuple(string +())"}
+{"task_id": "Mbpp/790", "completion": ""}
+{"task_id": "Mbpp/791", "completion": ""}
+{"task_id": "Mbpp/792", "completion": ""}
+{"task_id": "Mbpp/793", "completion": "def last(arr, x):\n    return arr.index(val)"}
+{"task_id": "Mbpp/794", "completion": ""}
+{"task_id": "Mbpp/796", "completion": ""}
+{"task_id": "Mbpp/797", "completion": ""}
+{"task_id": "Mbpp/798", "completion": "def _sum(arr):\n    return sum(arr)"}
+{"task_id": "Mbpp/799", "completion": ""}
+{"task_id": "Mbpp/800", "completion": "def remove_all_spaces(s):\n    return s.strip()"}
+{"task_id": "Mbpp/801", "completion": ""}
+{"task_id": "Mbpp/803", "completion": ""}
+{"task_id": "Mbpp/804", "completion": ""}
+{"task_id": "Mbpp/805", "completion": ""}
+{"task_id": "Mbpp/806", "completion": ""}
+{"task_id": "Mbpp/807", "completion": ""}
+{"task_id": "Mbpp/808", "completion": "def check_K(t, k):\n    pass"}
+{"task_id": "Mbpp/809", "completion": "def check_smaller(t1, t2):\n    pass"}

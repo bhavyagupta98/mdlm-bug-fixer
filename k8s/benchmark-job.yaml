@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-benchmark-humaneval
+  name: mdlm-benchmark-mbpp
   labels:
     app: mdlm-code-fixer
     task: benchmark
@@ -31,13 +31,13 @@ spec:
 
             echo "=== MBPP (LoRA, 5 samples) ===" &&
             python run_evalplus.py \
-              --benchmark humaneval \
+              --benchmark mbpp \
               --adapter-path /outputs/run2/llada_lora/lora_adapter \
               --num-samples 1 \
               --steps 256 \
               --temperature 0 \
               --batch-size 4 \
-              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/humaneval_instruct_lora_pass1.log
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_lora_pass1.log
 
         resources:
           limits:
