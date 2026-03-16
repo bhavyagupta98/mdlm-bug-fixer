@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-train
+  name: mdlm-train-llada2-mini
   labels:
     app: mdlm-code-fixer
     task: train
@@ -26,7 +26,7 @@ spec:
             git clone https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
             cd /workspace/mdlm-bug-fixer &&
             git checkout inference-pipeline &&
-            python model.py --use-bf16 --split train 2>&1 | tee /outputs/train.log
+            python model.py --model llada2-mini --use-bf16 --split train 2>&1 | tee /outputs/train-llada2-mini.log
 
         resources:
           limits:

@@ -37,7 +37,7 @@ spec:
               --num-samples 5 \
               --max-new-tokens 1024 \
               --steps 128 \
-              --temperature 0.5 \
+              --temperature 0.3 \
               --batch-size 4 \
               --instruct \
               --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/bcb_instruct_lora.log

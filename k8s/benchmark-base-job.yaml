@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-benchmark-base-mbpp
+  name: mdlm-benchmark-base-mbpp-instruct
   labels:
     app: mdlm-code-fixer
     task: benchmark-base-mbpp
@@ -33,11 +33,12 @@ spec:
             python run_evalplus.py \
               --benchmark mbpp \
               --no-adapter \
-              --num-samples 1 \
+              --num-samples 5 \
               --steps 256 \
-              --temperature 0 \
+              --temperature 0.2 \
               --batch-size 4 \
-              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_base.log
+              --instruct \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_instruct_base.log
 
         resources:
           limits:

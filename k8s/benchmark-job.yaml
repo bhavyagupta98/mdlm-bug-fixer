@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-benchmark-mbpp
+  name: mdlm-benchmark-mbpp-instruct
   labels:
     app: mdlm-code-fixer
     task: benchmark
@@ -33,11 +33,12 @@ spec:
             python run_evalplus.py \
               --benchmark mbpp \
               --adapter-path /outputs/run2/llada_lora/lora_adapter \
-              --num-samples 1 \
+              --num-samples 5 \
               --steps 256 \
-              --temperature 0 \
+              --temperature 0.2 \
               --batch-size 4 \
-              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_lora_pass1.log
+              --instruct \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/mbpp_instruct_lora_pass5.log
 
         resources:
           limits:

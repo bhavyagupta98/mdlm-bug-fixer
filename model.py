@@ -28,9 +28,12 @@ from peft import LoraConfig, get_peft_model
 BASE_DIR = Path(__file__).resolve().parent
 
 TRAIN_GZ = BASE_DIR / "processed_train.jsonl.gz"
-OUT_DIR = BASE_DIR / "runs/llada_lora"
+DEFAULT_MODEL = "GSAI-ML/LLaDA-8B-Instruct"
 
-MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
+MODEL_PRESETS = {
+    "llada-8b": "GSAI-ML/LLaDA-8B-Instruct",
+    "llada2-mini": "inclusionAI/LLaDA2.0-mini",
+}
 
 # Debug: stop after N base records indexed from gzip (set None for full)
 DEBUG_MAX_RECORDS: Optional[int] = None
@@ -282,6 +285,12 @@ def main():
     parser.add_argument("--max-records", type=int, default=DEBUG_MAX_RECORDS, help="Limit number of base gzip records to index")
     parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"],
                         help="Which data split to train on (default: train)")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=f"Model name or preset. Presets: {', '.join(MODEL_PRESETS.keys())}. Or pass a full HuggingFace model ID.",
+    )
     parser.add_argument("--use-bf16", action="store_true", help="Use bf16 if supported by GPU (otherwise float32)")
     parser.add_argument(
         "--max-seq-len",
@@ -291,10 +300,17 @@ def main():
     )
     args, _ = parser.parse_known_args()  # Colab/Jupyter safe
 
+    # Resolve model name: preset shorthand or full HuggingFace ID
+    model_name = MODEL_PRESETS.get(args.model, args.model)
+
+    # Derive output dir from model short name (e.g. "runs/llada2-mini_lora")
+    model_short = args.model if args.model in MODEL_PRESETS else model_name.split("/")[-1]
+    out_dir = BASE_DIR / f"runs/{model_short}_lora"
+
     torch.manual_seed(RANDOM_SEED)
 
-    print("[INFO] Loading tokenizer:", MODEL_NAME)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True, use_fast=True)
+    print("[INFO] Loading tokenizer:", model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, use_fast=True)
 
     # Ensure pad token for batching
     if tokenizer.pad_token_id is None:
@@ -334,9 +350,9 @@ def main():
         return
 
     print(f"[INFO] CUDA={cuda} bf16_supported={bf16_supported} use_bf16={use_bf16} dtype={load_dtype}")
-    print("[INFO] Loading model:", MODEL_NAME)
+    print("[INFO] Loading model:", model_name)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
+        model_name,
         trust_remote_code=True,
         torch_dtype=load_dtype,
     )
@@ -395,7 +411,7 @@ def main():
         print("[WARN] Model does not support gradient checkpointing, skipping.")
 
     args_tf = TrainingArguments(
-        output_dir=str(OUT_DIR),
+        output_dir=str(out_dir),
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         learning_rate=2e-4,
@@ -438,7 +454,7 @@ def main():
     trainer.train()
 
     print("[INFO] Saving final LoRA adapter...")
-    trainer.save_model(str(OUT_DIR / "lora_adapter"))
+    trainer.save_model(str(out_dir / "lora_adapter"))
     print("[DONE]")
 
 
