@@ -122,7 +122,7 @@ spec:
         - name: PROJECTS
           value: "Lang,Math,Time,Collections"
         - name: BUG_LIMIT
-          value: "50"
+          value: "20"
 
         # Pretrained LoRA adapter source on Hugging Face.
         - name: HF_ADAPTER_REPO

@@ -14,12 +14,14 @@ BASE_OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/runs/java_swebench}"
 # Format: "llada llama" or override as MODELS="llada"
 MODELS="${MODELS:-llada llama}"
 
-# Modes to run (localized, generative, or both)
-MODES="${MODES:-localized generative}"
+# Strategy flag (single mode per run): generative or localized.
+# Preferred default is generative; override with SWE_STRATEGY="localized".
+SWE_STRATEGY="${SWE_STRATEGY:-generative}"
 
 # Generative mode generation budget
 ORACLE_LENGTH="${ORACLE_LENGTH:-1}"   # 1=use oracle length, 0=use --max-new-tokens
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
+NUM_SAMPLES="${NUM_SAMPLES:-5}"
 
 # LoRA adapter for LLaDA
 ADAPTER_PATH="${ADAPTER_PATH:-$ROOT_DIR/runs/llada_lora/lora_adapter}"
@@ -44,6 +46,7 @@ BASE_ARGS=(
   python run_java_swebench.py
   --projects "$PROJECTS"
   --bug-limit "$BUG_LIMIT"
+  --num-samples "$NUM_SAMPLES"
 )
 
 if [[ -n "$DEFECTS4J_HOME" ]]; then
@@ -60,7 +63,8 @@ echo "[INFO] Projects:   $PROJECTS"
 echo "[INFO] Bug ids:    ${BUG_IDS:-<all>}"
 echo "[INFO] Bug limit:  $BUG_LIMIT"
 echo "[INFO] Models:     $MODELS"
-echo "[INFO] Modes:      $MODES"
+echo "[INFO] Strategy:   $SWE_STRATEGY"
+echo "[INFO] Samples:    $NUM_SAMPLES"
 
 # ================================================================
 # Main benchmark loop: model × mode × (adapter for llada)
@@ -74,7 +78,12 @@ for MODEL in $MODELS; do
   echo "║  MODEL: $MODEL ($MODEL_ID)"
   echo "╚═════════════════════════════════════════════════════════════╝"
 
-  for MODE in $MODES; do
+  MODE="$SWE_STRATEGY"
+  if [[ "$MODE" != "generative" && "$MODE" != "localized" ]]; then
+    echo "[ERROR] Invalid SWE_STRATEGY=$MODE (expected: generative | localized)"
+    exit 1
+  fi
+
     if [[ $SUPPORTS_ADAPTER -eq 1 ]]; then
       # LLaDA: run both base and finetuned
       for ADAPTER_LABEL in base finetuned; do
@@ -130,7 +139,6 @@ for MODEL in $MODELS; do
 
       "${CMD[@]}"
     fi
-  done
 done
 
 echo ""

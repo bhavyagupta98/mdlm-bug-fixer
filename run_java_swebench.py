@@ -42,6 +42,7 @@ from evaluation import (
     normalized_edit_distance,
     patch_bleu,
     patch_string_exact_match,
+    pass_at_k_unbiased,
     per_hunk_exact_match,
     token_edit_distance,
     token_exact_match_rate,
@@ -86,12 +87,11 @@ def parse_args() -> argparse.Namespace:
                         help="Run base model without LoRA")
 
     parser.add_argument(
-        "--mode", type=str, default="localized",
+        "--mode", type=str, default="generative",
         choices=["localized", "generative"],
         help=(
-            "localized: oracle-localized diff masking (original mode); "
-            "generative: feed prompt + full buggy code, model generates the fixed file "
-            "without being told where the bug is"
+            "generative: prompt + full buggy code, model generates complete fixed file; "
+            "localized: oracle-localized diff masking (original mode)"
         ),
     )
 
@@ -108,6 +108,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--steps", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--num-samples", type=int, default=5,
+                        help="Number of independent samples per bug for pass@k estimation")
     parser.add_argument("--remasking", type=str, default="low_confidence",
                         choices=["low_confidence", "random"])
     parser.add_argument("--top-k", type=int, default=5)
@@ -624,6 +626,25 @@ def mean_or_none(values: List[Optional[float]]) -> Optional[float]:
     return (sum(cleaned) / len(cleaned)) if cleaned else None
 
 
+def bug_validated_success(
+    row: Dict[str, Any],
+    skip_validation: bool,
+    run_full_test_suite: bool,
+) -> bool:
+    if not row.get("all_files_exact"):
+        return False
+    if skip_validation:
+        return True
+    if row.get("compile_ok") is not True:
+        return False
+    trigger_ok = row.get("trigger_tests_ok")
+    if trigger_ok is False:
+        return False
+    if run_full_test_suite and row.get("full_test_suite_ok") is False:
+        return False
+    return True
+
+
 def aggregate_summary(
     file_records: List[Dict[str, Any]],
     bug_records: List[Dict[str, Any]],
@@ -645,6 +666,20 @@ def aggregate_summary(
         else "oracle-localized file repair with optional repository validation"
     )
 
+    def mean_key(records: List[Dict[str, Any]], key: str) -> Optional[float]:
+        vals = [r.get(key) for r in records if r.get(key) is not None]
+        return (sum(vals) / len(vals)) if vals else None
+
+    def mean_ratio(records: List[Dict[str, Any]], num_key: str, den_key: str) -> Optional[float]:
+        vals: List[float] = []
+        for row in records:
+            num = row.get(num_key)
+            den = row.get(den_key)
+            if num is None or den is None or den == 0:
+                continue
+            vals.append(float(num) / float(den))
+        return (sum(vals) / len(vals)) if vals else None
+
     return {
         "benchmark": benchmark_name,
         "benchmark_mode": benchmark_mode_desc,
@@ -652,15 +687,22 @@ def aggregate_summary(
         "projects": [p.strip() for p in args.projects.split(",") if p.strip()],
         "model": args.base_model,
         "adapter_path": None if args.no_adapter else args.adapter_path,
+        "num_samples_per_bug": args.num_samples,
         "num_file_instances": len(file_records),
         "num_bug_instances": len(bug_records),
         "file_exact_match_rate": rate(file_records, "full_file_exact_match"),
         # Only meaningful in localized mode, None in generative mode
         "file_all_hunks_correct_rate": None if is_generative else rate(file_records, "all_hunks_correct"),
-        "bug_exact_match_rate": rate(bug_records, "all_files_exact"),
-        "compile_success_rate": rate(bug_records, "compile_ok"),
-        "trigger_test_pass_rate": rate(bug_records, "trigger_tests_ok"),
-        "full_test_suite_pass_rate": rate(bug_records, "full_test_suite_ok") if args.run_full_test_suite else None,
+        "pass_at_5_bug_exact": mean_key(bug_records, "pass_at_5_bug_exact"),
+        "pass_at_5_bug_validated": mean_key(bug_records, "pass_at_5_bug_validated"),
+        "bug_exact_match_rate": mean_ratio(bug_records, "num_exact_samples", "num_samples"),
+        "compile_success_rate": mean_ratio(bug_records, "num_compile_ok_samples", "num_samples") if not args.skip_validation else None,
+        "trigger_test_pass_rate": mean_ratio(bug_records, "num_trigger_tests_ok_samples", "num_samples") if not args.skip_validation else None,
+        "full_test_suite_pass_rate": (
+            mean_ratio(bug_records, "num_full_test_suite_ok_samples", "num_samples")
+            if (args.run_full_test_suite and not args.skip_validation)
+            else None
+        ),
         "mean_token_exact_match": None if is_generative else mean_or_none([r.get("token_exact_match") for r in file_records]),
         "mean_patch_string_em": mean_or_none([r.get("patch_string_em") for r in file_records]),
         "mean_patch_bleu": mean_or_none([r.get("patch_bleu") for r in file_records]),
@@ -685,10 +727,14 @@ def write_bug_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         "project_id",
         "bug_id",
         "num_modified_files",
-        "all_files_exact",
-        "compile_ok",
-        "trigger_tests_ok",
-        "full_test_suite_ok",
+        "num_samples",
+        "num_exact_samples",
+        "num_validated_samples",
+        "pass_at_5_bug_exact",
+        "pass_at_5_bug_validated",
+        "num_compile_ok_samples",
+        "num_trigger_tests_ok_samples",
+        "num_full_test_suite_ok_samples",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -703,6 +749,11 @@ def ensure_parent(path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+
+    if args.num_samples > 1 and args.temperature <= 0.0:
+        print("[WARN] --num-samples > 1 with temperature=0.0 yields duplicate deterministic samples.")
+        print("[WARN] Auto-setting temperature to 0.8 for meaningful pass@k.")
+        args.temperature = 0.8
 
     defects4j_cmd = resolve_defects4j_command(args.defects4j_home, args.defects4j_cmd)
     output_dir = Path(args.output_dir)
@@ -741,6 +792,8 @@ def main() -> None:
             print("[INFO] Mode: oracle-localized Defects4J file repair")
     print(f"[INFO] Model: {args.base_model}")
     print(f"[INFO] Adapter: {'base-only' if args.no_adapter else (args.adapter_path or 'base-only')}")
+    print(f"[INFO] Samples per bug: {args.num_samples}")
+    print(f"[INFO] Temperature: {args.temperature}")
     print(f"[INFO] Defects4J cmd: {defects4j_cmd}")
 
     requested_bug_ids = parse_bug_id_filter(args.bug_ids)
@@ -787,7 +840,7 @@ def main() -> None:
                 modified_classes = [line.strip() for line in modified_classes_raw.splitlines() if line.strip()]
                 trigger_tests = [line.strip() for line in trigger_tests_raw.splitlines() if line.strip()]
 
-                bug_file_records: List[Dict[str, Any]] = []
+                bug_inputs: List[Dict[str, Any]] = []
 
                 for class_name in modified_classes:
                     rel_path = class_name_to_java_path(class_name, src_dir)
@@ -800,116 +853,177 @@ def main() -> None:
 
                     buggy_code = buggy_file.read_text(encoding="utf-8", errors="ignore")
                     fixed_code = fixed_file.read_text(encoding="utf-8", errors="ignore")
-
-                    if args.mode == "generative":
-                        # No diff-based masking: model receives full buggy file and must
-                        # generate the complete fixed file from scratch.
-                        if causal:
-                            # Standard autoregressive model (e.g. Llama-2)
-                            metrics = evaluate_instance_generative_causal(
-                                model, tokenizer, buggy_code, fixed_code, args
-                            )
-                        else:
-                            # LLaDA masked-diffusion append-and-denoise
-                            metrics = evaluate_instance_generative(
-                                model, tokenizer, buggy_code, fixed_code, mask_token_id, args
-                            )
-                    else:
-                        # Oracle-localized mode: diff hunks are masked, model fills them in.
-                        # Only supported for masked-diffusion models (LLaDA).
-                        record = build_localized_record(
+                    localized_record = None
+                    if args.mode != "generative":
+                        localized_record = build_localized_record(
                             tokenizer=tokenizer,
                             mask_token_id=mask_token_id,
                             buggy_code=buggy_code,
                             fixed_code=fixed_code,
                             max_seq_len=args.max_seq_len,
                         )
-                        if record is None:
+                        if localized_record is None:
                             print(f"  [SKIP] {rel_path} has no usable multi-hunk diff after tokenization")
                             continue
-                        metrics = evaluate_instance(model, tokenizer, record, fixed_code, args)
 
-                    metrics.update({
-                        "mode": args.mode,
-                        "project_id": project_id,
-                        "bug_id": bug_id,
+                    bug_inputs.append({
                         "class_name": class_name,
-                        "file_path": str(rel_path),
+                        "rel_path": rel_path,
+                        "buggy_file": buggy_file,
+                        "buggy_code": buggy_code,
+                        "fixed_code": fixed_code,
+                        "localized_record": localized_record,
                     })
 
-                    predicted_out = predictions_dir / project_id / str(bug_id) / rel_path
-                    ensure_parent(predicted_out)
-                    predicted_out.write_text(metrics["predicted_code"], encoding="utf-8")
-                    metrics["predicted_file"] = str(predicted_out)
+                sample_bug_results: List[Dict[str, Any]] = []
 
-                    # Apply predicted file to buggy checkout for optional validation.
-                    buggy_file.write_text(metrics["predicted_code"], encoding="utf-8")
+                for sample_idx in range(args.num_samples):
+                    sample_id = sample_idx + 1
+                    sample_file_records: List[Dict[str, Any]] = []
 
-                    file_records.append(metrics)
-                    bug_file_records.append(metrics)
+                    for item in bug_inputs:
+                        class_name = item["class_name"]
+                        rel_path = item["rel_path"]
+                        buggy_file = item["buggy_file"]
+                        buggy_code = item["buggy_code"]
+                        fixed_code = item["fixed_code"]
 
-                    hunks_info = (
-                        f"gen_tokens={metrics['generated_tokens']}"
-                        if args.mode == "generative"
-                        else f"hunks={metrics['num_hunks']}"
+                        if args.mode == "generative":
+                            if causal:
+                                metrics = evaluate_instance_generative_causal(
+                                    model, tokenizer, buggy_code, fixed_code, args
+                                )
+                            else:
+                                metrics = evaluate_instance_generative(
+                                    model, tokenizer, buggy_code, fixed_code, mask_token_id, args
+                                )
+                        else:
+                            metrics = evaluate_instance(
+                                model,
+                                tokenizer,
+                                item["localized_record"],
+                                fixed_code,
+                                args,
+                            )
+
+                        metrics.update({
+                            "mode": args.mode,
+                            "project_id": project_id,
+                            "bug_id": bug_id,
+                            "sample_id": sample_id,
+                            "class_name": class_name,
+                            "file_path": str(rel_path),
+                        })
+
+                        predicted_out = (
+                            predictions_dir
+                            / project_id
+                            / str(bug_id)
+                            / f"sample_{sample_id}"
+                            / rel_path
+                        )
+                        ensure_parent(predicted_out)
+                        predicted_out.write_text(metrics["predicted_code"], encoding="utf-8")
+                        metrics["predicted_file"] = str(predicted_out)
+
+                        # Apply predicted file for this sampled attempt.
+                        buggy_file.write_text(metrics["predicted_code"], encoding="utf-8")
+
+                        file_records.append(metrics)
+                        sample_file_records.append(metrics)
+
+                        hunks_info = (
+                            f"gen_tokens={metrics['generated_tokens']}"
+                            if args.mode == "generative"
+                            else f"hunks={metrics['num_hunks']}"
+                        )
+                        print(
+                            f"  [S{sample_id}/{args.num_samples}] [FILE] {rel_path} "
+                            f"{hunks_info} "
+                            f"exact={metrics['full_file_exact_match']} "
+                            f"patch_em={metrics['patch_string_em']:.4f} "
+                            f"bleu={metrics['patch_bleu']:.4f}"
+                        )
+
+                    sample_bug_result: Dict[str, Any] = {
+                        "sample_id": sample_id,
+                        "project_id": project_id,
+                        "bug_id": bug_id,
+                        "num_modified_files": len(sample_file_records),
+                        "all_files_exact": bool(sample_file_records) and all(
+                            record["full_file_exact_match"] for record in sample_file_records
+                        ),
+                        "compile_ok": None,
+                        "trigger_tests_ok": None,
+                        "full_test_suite_ok": None,
+                        "trigger_test_count": len(trigger_tests),
+                    }
+
+                    if not args.skip_validation and sample_file_records:
+                        compile_result = run_defects4j_compile(defects4j_cmd, buggy_dir)
+                        sample_bug_result["compile_ok"] = compile_result["ok"]
+                        sample_bug_result["compile_stdout"] = compile_result["stdout"]
+                        sample_bug_result["compile_stderr"] = compile_result["stderr"]
+
+                        if compile_result["ok"]:
+                            if trigger_tests:
+                                trigger_ok = True
+                                failing_trigger_tests: List[str] = []
+                                for test_name in trigger_tests:
+                                    test_result = run_defects4j_test(defects4j_cmd, buggy_dir, test_name=test_name)
+                                    if not test_result["ok"]:
+                                        trigger_ok = False
+                                        failing_trigger_tests.append(test_name)
+                                sample_bug_result["trigger_tests_ok"] = trigger_ok
+                                sample_bug_result["failing_trigger_tests"] = failing_trigger_tests
+                            else:
+                                sample_bug_result["trigger_tests_ok"] = None
+
+                            if args.run_full_test_suite:
+                                full_suite_result = run_defects4j_test(defects4j_cmd, buggy_dir)
+                                sample_bug_result["full_test_suite_ok"] = full_suite_result["ok"]
+                                sample_bug_result["full_suite_failing_tests"] = full_suite_result["failing_tests"]
+                        else:
+                            sample_bug_result["trigger_tests_ok"] = False if trigger_tests else None
+                            if args.run_full_test_suite:
+                                sample_bug_result["full_test_suite_ok"] = False
+
+                    sample_bug_result["validated_success"] = bug_validated_success(
+                        sample_bug_result,
+                        skip_validation=args.skip_validation,
+                        run_full_test_suite=args.run_full_test_suite,
                     )
-                    print(
-                        f"  [FILE] {rel_path} "
-                        f"{hunks_info} "
-                        f"exact={metrics['full_file_exact_match']} "
-                        f"patch_em={metrics['patch_string_em']:.4f} "
-                        f"bleu={metrics['patch_bleu']:.4f}"
-                    )
+                    sample_bug_results.append(sample_bug_result)
+
+                n_samples = len(sample_bug_results)
+                c_exact = sum(1 for r in sample_bug_results if r.get("all_files_exact"))
+                c_validated = sum(1 for r in sample_bug_results if r.get("validated_success"))
+                c_compile = sum(1 for r in sample_bug_results if r.get("compile_ok") is True)
+                c_trigger = sum(1 for r in sample_bug_results if r.get("trigger_tests_ok") is True)
+                c_full_suite = sum(1 for r in sample_bug_results if r.get("full_test_suite_ok") is True)
 
                 bug_result: Dict[str, Any] = {
                     "project_id": project_id,
                     "bug_id": bug_id,
-                    "num_modified_files": len(bug_file_records),
-                    "all_files_exact": bool(bug_file_records) and all(
-                        record["full_file_exact_match"] for record in bug_file_records
-                    ),
-                    "compile_ok": None,
-                    "trigger_tests_ok": None,
-                    "full_test_suite_ok": None,
+                    "num_modified_files": len(bug_inputs),
+                    "num_samples": n_samples,
+                    "num_exact_samples": c_exact,
+                    "num_validated_samples": c_validated,
+                    "pass_at_5_bug_exact": pass_at_k_unbiased(n_samples, c_exact, 5) if n_samples > 0 else None,
+                    "pass_at_5_bug_validated": pass_at_k_unbiased(n_samples, c_validated, 5) if n_samples > 0 else None,
+                    "num_compile_ok_samples": c_compile,
+                    "num_trigger_tests_ok_samples": c_trigger,
+                    "num_full_test_suite_ok_samples": c_full_suite,
                     "trigger_test_count": len(trigger_tests),
                 }
-
-                if not args.skip_validation and bug_file_records:
-                    compile_result = run_defects4j_compile(defects4j_cmd, buggy_dir)
-                    bug_result["compile_ok"] = compile_result["ok"]
-                    bug_result["compile_stdout"] = compile_result["stdout"]
-                    bug_result["compile_stderr"] = compile_result["stderr"]
-
-                    if compile_result["ok"]:
-                        if trigger_tests:
-                            trigger_ok = True
-                            failing_trigger_tests: List[str] = []
-                            for test_name in trigger_tests:
-                                test_result = run_defects4j_test(defects4j_cmd, buggy_dir, test_name=test_name)
-                                if not test_result["ok"]:
-                                    trigger_ok = False
-                                    failing_trigger_tests.append(test_name)
-                            bug_result["trigger_tests_ok"] = trigger_ok
-                            bug_result["failing_trigger_tests"] = failing_trigger_tests
-                        else:
-                            bug_result["trigger_tests_ok"] = None
-
-                        if args.run_full_test_suite:
-                            full_suite_result = run_defects4j_test(defects4j_cmd, buggy_dir)
-                            bug_result["full_test_suite_ok"] = full_suite_result["ok"]
-                            bug_result["full_suite_failing_tests"] = full_suite_result["failing_tests"]
-                    else:
-                        bug_result["trigger_tests_ok"] = False if trigger_tests else None
-                        if args.run_full_test_suite:
-                            bug_result["full_test_suite_ok"] = False
 
                 bug_records.append(bug_result)
 
                 print(
                     f"  [BUG-SUMMARY] files={bug_result['num_modified_files']} "
-                    f"all_exact={bug_result['all_files_exact']} "
-                    f"compile={bug_result['compile_ok']} "
-                    f"trigger_tests={bug_result['trigger_tests_ok']}"
+                    f"samples={bug_result['num_samples']} "
+                    f"pass@5_exact={bug_result['pass_at_5_bug_exact']} "
+                    f"pass@5_validated={bug_result['pass_at_5_bug_validated']}"
                 )
 
             finally:
