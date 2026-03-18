@@ -1,0 +1,199 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swe-benchmark
+  labels:
+    app: mdlm-code-fixer
+    task: swe-benchmark
+spec:
+  backoffLimit: 0          # do not retry on failure
+  ttlSecondsAfterFinished: 3600   # clean up after 1 h
+  template:
+    metadata:
+      labels:
+        app: mdlm-code-fixer
+        task: swe-benchmark
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: swe-benchmark
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+        command:
+          - bash
+          - -c
+          - |
+            set -euo pipefail
+
+            apt-get update -qq
+            apt-get install -y -q git maven default-jdk wget unzip cpanminus perl curl
+
+            pip install --root-user-action=ignore --no-cache-dir \
+              "transformers==4.44.2" peft accelerate bitsandbytes \
+              codebleu sacrebleu
+
+            git clone --branch final2 --single-branch https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer
+            cd /workspace/mdlm-bug-fixer
+
+            echo "[SETUP] Downloading pretrained LoRA adapter from ${HF_ADAPTER_REPO}@${HF_ADAPTER_REVISION}"
+            python - <<'PY'
+            from huggingface_hub import snapshot_download
+            import os
+
+            repo_id = os.environ.get("HF_ADAPTER_REPO", "Kkuntal990/mdlm-bug-fixer")
+            revision = os.environ.get("HF_ADAPTER_REVISION", "main")
+            local_dir = os.environ.get("HF_ADAPTER_LOCAL_DIR", "/outputs/runs/llada_lora/hf_download")
+            token = os.environ.get("HF_TOKEN")
+
+            snapshot_download(
+              repo_id=repo_id,
+              revision=revision,
+              local_dir=local_dir,
+              local_dir_use_symlinks=False,
+              token=token,
+            )
+            print(f"[INFO] Downloaded adapter repository to {local_dir}")
+            PY
+
+            ADAPTER_LOCAL_DIR="${HF_ADAPTER_LOCAL_DIR:-/outputs/runs/llada_lora/hf_download}"
+            ADAPTER_DEST="${ADAPTER_PATH:-/outputs/runs/llada_lora/lora_adapter}"
+
+            ADAPTER_CONFIG_PATH="$(find "$ADAPTER_LOCAL_DIR" -type f -name adapter_config.json | head -n 1 || true)"
+            if [ -z "$ADAPTER_CONFIG_PATH" ]; then
+              echo "[ERROR] Could not find adapter_config.json in downloaded repo."
+              echo "        Searched recursively under: $ADAPTER_LOCAL_DIR"
+              echo "[DEBUG] Top-level files in downloaded repo:"
+              find "$ADAPTER_LOCAL_DIR" -maxdepth 2 -type f | head -n 30 || true
+              exit 1
+            fi
+            RESOLVED_ADAPTER_SRC="$(dirname "$ADAPTER_CONFIG_PATH")"
+            echo "[INFO] Resolved adapter directory: $RESOLVED_ADAPTER_SRC"
+
+            mkdir -p "$(dirname "$ADAPTER_DEST")"
+            rm -rf "$ADAPTER_DEST"
+            cp -r "$RESOLVED_ADAPTER_SRC" "$ADAPTER_DEST"
+            echo "[INFO] Using LoRA adapter at $ADAPTER_DEST"
+
+            wget -q https://github.com/rjust/defects4j/archive/refs/tags/v2.0.0.tar.gz -O /tmp/d4j.tar.gz
+            tar -xzf /tmp/d4j.tar.gz -C /opt
+            mv /opt/defects4j-2.0.0 /opt/defects4j
+            cd /opt/defects4j
+            cpanm --installdeps . -q
+            ./init.sh
+
+            cd /workspace/mdlm-bug-fixer
+            DEFECTS4J_HOME=/opt/defects4j \
+            PROJECTS="${PROJECTS:-Lang,Math}" \
+            BUG_LIMIT="${BUG_LIMIT:-10}" \
+            ADAPTER_PATH="$ADAPTER_DEST" \
+            OUTPUT_DIR=/outputs/java_swebench \
+            bash run_java_swebench.sh
+
+            echo "[INFO] Benchmark complete. Results in /outputs/java_swebench"
+
+        resources:
+          limits:
+            nvidia/gpu: "1"
+            memory: "16Gi"
+            cpu: "1"
+          requests:
+            nvidia/gpu: "1"
+            memory: "16Gi"
+            cpu: "1"
+
+        volumeMounts:
+          - name: cache-volume
+            mountPath: /cache
+          - name: outputs-volume
+            mountPath: /outputs
+          - name: dev-shm
+            mountPath: /dev/shm
+
+        env:
+        # HuggingFace token (REQUIRED — meta-llama/Llama-2-7b-chat-hf is gated)
+        # Create the secret first: kubectl create secret generic hf-token --from-literal=token=<your_token>
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: false
+
+        # Benchmark parameters (override via Job env or kubectl)
+        - name: PROJECTS
+          value: "Lang,Math,Time,Collections"
+        - name: BUG_LIMIT
+          value: "50"
+
+        # Pretrained LoRA adapter source on Hugging Face.
+        - name: HF_ADAPTER_REPO
+          value: "Kkuntal990/mdlm-bug-fixer"
+        - name: HF_ADAPTER_REVISION
+          value: "main"
+
+        # Download location and runtime adapter destination on PVC.
+        - name: HF_ADAPTER_LOCAL_DIR
+          value: "/outputs/runs/llada_lora/hf_download"
+        - name: ADAPTER_PATH
+          value: "/outputs/runs/llada_lora/lora_adapter"
+
+        # Cache directories
+        - name: HF_HOME
+          value: "/cache/hf"
+        - name: TRANSFORMERS_CACHE
+          value: "/cache/hf/transformers"
+        - name: HF_DATASETS_CACHE
+          value: "/cache/hf/datasets"
+        - name: TORCH_HOME
+          value: "/cache/torch"
+        - name: PIP_CACHE_DIR
+          value: "/cache/pip"
+
+        # Python and CUDA settings
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTORCH_CUDA_ALLOC_CONF
+          value: "expandable_segments:True"
+        # Models to benchmark (space-separated: "llada llama")
+        - name: MODELS
+          value: "llada llama"
+
+      tolerations:
+        - key: nautilus.io/reservation
+          operator: Exists
+          effect: NoSchedule
+        - effect: NoSchedule
+          key: nautilus.io/hardware
+          operator: Exists
+        - effect: NoSchedule
+          key: nautilus.io/hardware
+          operator: Equal
+          value: large-gpu
+        - effect: NoExecute
+          key: nautilus.io/hardware
+          operator: Equal
+          value: large-gpu
+        - effect: NoSchedule
+          key: nautilus.io/testing
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        - effect: PreferNoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        - key: nautilus.io/issue
+          operator: Exists
+          effect: NoSchedule
+
+      volumes:
+        - name: cache-volume
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: outputs-volume
+          persistentVolumeClaim:
+            claimName: bgupta-pvc
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
