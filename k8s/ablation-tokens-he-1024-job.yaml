@@ -1,41 +1,53 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-train-dream-7b
+  name: ablation-tokens-he-1024
   labels:
     app: mdlm-code-fixer
-    task: train
+    task: ablation-tokens-he-1024
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
         app: mdlm-code-fixer
-        task: train
+        task: ablation-tokens-he-1024
     spec:
       restartPolicy: Never
       containers:
-      - name: train
+      - name: benchmark
         image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
         command:
           - bash
           - -c
           - |
             apt-get update && apt-get install -y git &&
-            pip install --no-cache-dir transformers peft accelerate bitsandbytes &&
+            pip install --no-cache-dir \
+              "transformers==4.44.2" peft accelerate bitsandbytes \
+              evalplus datasets &&
             git clone https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
             cd /workspace/mdlm-bug-fixer &&
-            git checkout inference-pipeline &&
-            python model.py --model dream-7b --use-bf16 --split train 2>&1 | tee /outputs/train-dream-7b.log
+            git checkout main &&
+
+            echo "=== Running HumanEval LoRA raw max-tokens=1024 ===" &&
+            python run_evalplus.py \
+              --benchmark humaneval \
+              --adapter-path /outputs/run2/llada_lora/lora_adapter \
+              --num-samples 5 \
+              --steps 256 \
+              --max-new-tokens 1024 \
+              --temperature 0.3 \
+              --batch-size 4 \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/ablation-tokens-he-1024.log
 
         resources:
           limits:
             nvidia.com/a100: "1"
-            memory: "32Gi"
+            memory: "24Gi"
             cpu: "2"
           requests:
             nvidia.com/a100: "1"
-            memory: "32Gi"
+            memory: "24Gi"
             cpu: "2"
 
         volumeMounts:

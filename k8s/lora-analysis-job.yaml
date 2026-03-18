@@ -1,0 +1,229 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lora-analysis
+  labels:
+    app: mdlm-code-fixer
+    task: lora-analysis
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: mdlm-code-fixer
+        task: lora-analysis
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: analysis
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+        command:
+          - bash
+          - -c
+          - |
+            pip install --no-cache-dir safetensors numpy &&
+            python3 -c "
+            import json
+            import numpy as np
+            from safetensors.numpy import load_file
+            from collections import defaultdict
+
+            weights = load_file('/outputs/run2/llada_lora/lora_adapter/adapter_model.safetensors')
+            alpha, r = 32, 16
+            scale = alpha / r
+
+            results = {}
+
+            # 1. Modules present
+            modules_present = set()
+            for name in weights:
+                for m in ('q_proj','k_proj','v_proj','o_proj','gate_proj','up_proj','down_proj'):
+                    if m in name: modules_present.add(m)
+            results['modules_present'] = sorted(modules_present)
+            results['modules_missing'] = [m for m in ['o_proj','gate_proj','down_proj'] if m not in modules_present]
+            print('=== MODULES WITH WEIGHTS ===')
+            print(f'Present: {results[\"modules_present\"]}')
+            print(f'Missing: {results[\"modules_missing\"]}')
+            print()
+
+            # 2. Layer-wise delta norms
+            layer_data = defaultdict(dict)
+            layer_svd = defaultdict(dict)
+            for name, w in weights.items():
+                if 'lora_A' not in name: continue
+                b_name = name.replace('lora_A','lora_B')
+                if b_name not in weights: continue
+                A, B = weights[name], weights[b_name]
+
+                # Frobenius norm via trace trick: ||BA||^2 = trace(AA^T @ B^TB)
+                AAt = A @ A.T  # (r,r)
+                BtB = B.T @ B  # (r,r)
+                fnorm = scale * float(np.sqrt(np.trace(AAt @ BtB)))
+
+                # SVD of delta = B @ A
+                delta = B @ A
+                S = np.linalg.svd(delta, compute_uv=False)
+                S_scaled = S * scale
+                eff_rank = int(np.sum(S_scaled > 0.01 * S_scaled[0]))
+                energy_top1 = float(S_scaled[0]**2 / np.sum(S_scaled**2)) * 100 if np.sum(S_scaled**2) > 0 else 0
+                energy_top3 = float(np.sum(S_scaled[:3]**2) / np.sum(S_scaled**2)) * 100 if np.sum(S_scaled**2) > 0 else 0
+
+                parts = name.split('.')
+                layer_num = module_type = None
+                for i, p in enumerate(parts):
+                    if p == 'blocks' and i+1 < len(parts): layer_num = int(parts[i+1])
+                    if p in modules_present: module_type = p
+
+                layer_data[layer_num][module_type] = fnorm
+                layer_svd[layer_num][module_type] = {
+                    'fnorm': fnorm,
+                    'spectral': float(S_scaled[0]),
+                    'eff_rank': eff_rank,
+                    'energy_top1': energy_top1,
+                    'energy_top3': energy_top3,
+                    'top5_sv': [float(s) for s in S_scaled[:5]],
+                }
+
+            # Print layer-wise delta norms
+            print('=== LAYER-WISE DELTA NORMS ||scale * B @ A||_F ===')
+            print(f'Scale = alpha/r = {alpha}/{r} = {scale}')
+            print()
+            header = f'{\"Layer\":>5} | {\"q_proj\":>8} | {\"k_proj\":>8} | {\"v_proj\":>8} | {\"up_proj\":>8} | {\"Total\":>8}'
+            print(header)
+            print('-' * len(header))
+            layer_totals = {}
+            for layer in sorted(layer_data):
+                m = layer_data[layer]
+                q=m.get('q_proj',0); k=m.get('k_proj',0); v=m.get('v_proj',0); u=m.get('up_proj',0)
+                total = q+k+v+u
+                layer_totals[layer] = total
+                print(f'{layer:>5} | {q:>8.4f} | {k:>8.4f} | {v:>8.4f} | {u:>8.4f} | {total:>8.4f}')
+
+            sorted_layers = sorted(layer_totals.items(), key=lambda x: x[1], reverse=True)
+            print()
+            print('=== TOP 5 MOST MODIFIED LAYERS ===')
+            for l, t in sorted_layers[:5]: print(f'  Layer {l}: {t:.4f}')
+            print()
+            print('=== BOTTOM 5 LEAST MODIFIED LAYERS ===')
+            for l, t in sorted_layers[-5:]: print(f'  Layer {l}: {t:.4f}')
+
+            # 3. Module averages
+            print()
+            print('=== MODULE AVERAGE DELTA NORMS ===')
+            for mod in ['q_proj','k_proj','v_proj','up_proj']:
+                vals = [layer_data[l].get(mod,0) for l in layer_data]
+                print(f'  {mod}: mean={np.mean(vals):.4f} std={np.std(vals):.4f} max={np.max(vals):.4f} min={np.min(vals):.4f}')
+
+            # 4. SVD analysis per module
+            print()
+            print('=== SVD ANALYSIS PER MODULE (averaged across 32 layers) ===')
+            for mod in ['q_proj','k_proj','v_proj','up_proj']:
+                ranks = []; e1 = []; e3 = []; specs = []
+                for l in layer_svd:
+                    if mod in layer_svd[l]:
+                        d = layer_svd[l][mod]
+                        ranks.append(d['eff_rank'])
+                        e1.append(d['energy_top1'])
+                        e3.append(d['energy_top3'])
+                        specs.append(d['spectral'])
+                print(f'  {mod}: avg_eff_rank={np.mean(ranks):.1f} avg_top1_energy={np.mean(e1):.1f}% avg_top3_energy={np.mean(e3):.1f}% avg_spectral={np.mean(specs):.4f}')
+
+            # 5. SVD per layer for all modules
+            print()
+            print('=== SVD PER LAYER (effective rank / spectral norm) ===')
+            header2 = f'{\"Layer\":>5} | {\"q eff_r\":>8} | {\"k eff_r\":>8} | {\"v eff_r\":>8} | {\"up eff_r\":>8} | {\"q spec\":>8} | {\"k spec\":>8} | {\"v spec\":>8} | {\"up spec\":>8}'
+            print(header2)
+            print('-' * len(header2))
+            for layer in sorted(layer_svd):
+                m = layer_svd[layer]
+                qr=m.get('q_proj',{}).get('eff_rank',0); kr=m.get('k_proj',{}).get('eff_rank',0)
+                vr=m.get('v_proj',{}).get('eff_rank',0); ur=m.get('up_proj',{}).get('eff_rank',0)
+                qs=m.get('q_proj',{}).get('spectral',0); ks=m.get('k_proj',{}).get('spectral',0)
+                vs=m.get('v_proj',{}).get('spectral',0); us=m.get('up_proj',{}).get('spectral',0)
+                print(f'{layer:>5} | {qr:>8} | {kr:>8} | {vr:>8} | {ur:>8} | {qs:>8.4f} | {ks:>8.4f} | {vs:>8.4f} | {us:>8.4f}')
+
+            # 6. Weight sparsity
+            print()
+            print('=== WEIGHT SPARSITY (% near zero, |w| < 1e-4) ===')
+            for mod in ['q_proj','k_proj','v_proj','up_proj']:
+                a_sparse = []; b_sparse = []
+                for name, w in weights.items():
+                    if mod not in name: continue
+                    sp = float(np.mean(np.abs(w) < 1e-4)) * 100
+                    if 'lora_A' in name: a_sparse.append(sp)
+                    elif 'lora_B' in name: b_sparse.append(sp)
+                print(f'  {mod}: lora_A avg_sparsity={np.mean(a_sparse):.1f}% lora_B avg_sparsity={np.mean(b_sparse):.1f}%')
+
+            # 7. Overall
+            total_params = sum(w.size for w in weights.values())
+            print()
+            print('=== OVERALL ===')
+            print(f'Total LoRA params: {total_params:,} ({total_params/1e6:.1f}M)')
+            print(f'Base model: ~8B params')
+            print(f'LoRA/Base: {total_params/8e9*100:.3f}%')
+            print(f'Rank: {r}, Alpha: {alpha}, Scale: {scale}')
+
+            # Save JSON
+            json_results = {
+                'config': {'rank': r, 'alpha': alpha, 'scale': scale, 'total_params': total_params},
+                'modules_present': results['modules_present'],
+                'modules_missing': results['modules_missing'],
+                'layer_deltas': {str(l): {m: v for m,v in d.items()} for l,d in layer_data.items()},
+                'layer_svd': {str(l): d for l,d in layer_svd.items()},
+                'layer_totals': {str(l): t for l,t in layer_totals.items()},
+            }
+            with open('/outputs/lora_analysis.json', 'w') as f:
+                json.dump(json_results, f, indent=2)
+            print()
+            print('Saved full results to /outputs/lora_analysis.json')
+            "
+        resources:
+          limits:
+            nvidia.com/a100: "1"
+            memory: "24Gi"
+            cpu: "2"
+          requests:
+            nvidia.com/a100: "1"
+            memory: "24Gi"
+            cpu: "2"
+
+        volumeMounts:
+          - name: outputs-volume
+            mountPath: /outputs
+          - name: dev-shm
+            mountPath: /dev/shm
+
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+
+      tolerations:
+        - key: nautilus.io/reservation
+          operator: Exists
+          effect: NoSchedule
+        - effect: NoSchedule
+          key: nautilus.io/hardware
+          operator: Equal
+          value: large-gpu
+        - effect: PreferNoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: nvidia.com/gpu.product
+                operator: In
+                values:
+                  - NVIDIA-A100-SXM4-80GB
+
+      volumes:
+        - name: outputs-volume
+          persistentVolumeClaim:
+            claimName: mdlm-outputs
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

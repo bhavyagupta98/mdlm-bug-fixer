@@ -1,41 +1,52 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mdlm-train-dream-7b
+  name: ablation-steps-mbpp-s64
   labels:
     app: mdlm-code-fixer
-    task: train
+    task: ablation-steps-mbpp-s64
 spec:
   backoffLimit: 0
   template:
     metadata:
       labels:
         app: mdlm-code-fixer
-        task: train
+        task: ablation-steps-mbpp-s64
     spec:
       restartPolicy: Never
       containers:
-      - name: train
+      - name: benchmark
         image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
         command:
           - bash
           - -c
           - |
             apt-get update && apt-get install -y git &&
-            pip install --no-cache-dir transformers peft accelerate bitsandbytes &&
+            pip install --no-cache-dir \
+              "transformers==4.44.2" peft accelerate bitsandbytes \
+              evalplus datasets &&
             git clone https://github.com/bhavyagupta98/mdlm-bug-fixer.git /workspace/mdlm-bug-fixer &&
             cd /workspace/mdlm-bug-fixer &&
-            git checkout inference-pipeline &&
-            python model.py --model dream-7b --use-bf16 --split train 2>&1 | tee /outputs/train-dream-7b.log
+            git checkout main &&
+
+            echo "=== Running MBPP LoRA (raw) with 64 diffusion steps ===" &&
+            python run_evalplus.py \
+              --benchmark mbpp \
+              --adapter-path /outputs/run2/llada_lora/lora_adapter \
+              --num-samples 5 \
+              --steps 64 \
+              --temperature 0.2 \
+              --batch-size 4 \
+              --output-dir /outputs/benchmark_results 2>&1 | tee /outputs/ablation-steps-mbpp-s64.log
 
         resources:
           limits:
             nvidia.com/a100: "1"
-            memory: "32Gi"
+            memory: "24Gi"
             cpu: "2"
           requests:
             nvidia.com/a100: "1"
-            memory: "32Gi"
+            memory: "24Gi"
             cpu: "2"
 
         volumeMounts:

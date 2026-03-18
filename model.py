@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
+    AutoModel,
     TrainingArguments,
     Trainer,
 )
@@ -33,6 +34,7 @@ DEFAULT_MODEL = "GSAI-ML/LLaDA-8B-Instruct"
 MODEL_PRESETS = {
     "llada-8b": "GSAI-ML/LLaDA-8B-Instruct",
     "llada2-mini": "inclusionAI/LLaDA2.0-mini",
+    "dream-7b": "Dream-org/Dream-v0-Instruct-7B",
 }
 
 # Debug: stop after N base records indexed from gzip (set None for full)
@@ -291,6 +293,8 @@ def main():
         default=DEFAULT_MODEL,
         help=f"Model name or preset. Presets: {', '.join(MODEL_PRESETS.keys())}. Or pass a full HuggingFace model ID.",
     )
+    parser.add_argument("--batch-size", type=int, default=1, help="Per-device train batch size (default: 1)")
+    parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps (default: 4)")
     parser.add_argument("--use-bf16", action="store_true", help="Use bf16 if supported by GPU (otherwise float32)")
     parser.add_argument(
         "--max-seq-len",
@@ -351,11 +355,21 @@ def main():
 
     print(f"[INFO] CUDA={cuda} bf16_supported={bf16_supported} use_bf16={use_bf16} dtype={load_dtype}")
     print("[INFO] Loading model:", model_name)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        torch_dtype=load_dtype,
-    )
+    is_causal_lm = True
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=load_dtype,
+        )
+    except ValueError:
+        print("[INFO] AutoModelForCausalLM failed, falling back to AutoModel")
+        is_causal_lm = False
+        model = AutoModel.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=load_dtype,
+        )
     if cuda:
         model = model.cuda()
 
@@ -378,13 +392,13 @@ def main():
             print(f"[DRY-RUN] {k}: shape={tuple(v.shape)} dtype={v.dtype}")
         return
 
-    # LoRA config
+    # LoRA config — use CAUSAL_LM for standard models, None for custom (e.g. Dream)
     lora_cfg = LoraConfig(
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
         bias="none",
-        task_type="CAUSAL_LM",
+        task_type="CAUSAL_LM" if is_causal_lm else None,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
     )
 
@@ -403,6 +417,9 @@ def main():
     model = get_peft_model(model, lora_cfg)
     model.print_trainable_parameters()
 
+    # Ensure input embeddings require grad (needed for gradient checkpointing)
+    model.enable_input_require_grads()
+
     # Memory saver
     try:
         model.gradient_checkpointing_enable()
@@ -412,8 +429,8 @@ def main():
 
     args_tf = TrainingArguments(
         output_dir=str(out_dir),
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.grad_accum,
         learning_rate=2e-4,
         weight_decay=0.0,
         warmup_ratio=0.03,
@@ -431,8 +448,11 @@ def main():
 
     # LLaDA's forward() returns logits only, no loss — compute it ourselves
     class MDLMTrainer(Trainer):
-        def compute_loss(self, model, inputs, return_outputs=False):
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
             labels = inputs.pop("labels")
+            # Drop attention_mask for models that don't handle 2D masks (e.g. Dream)
+            if not is_causal_lm and "attention_mask" in inputs:
+                del inputs["attention_mask"]
             outputs = model(**inputs)
             logits = outputs.logits  # (batch, seq_len, vocab)
             loss = torch.nn.functional.cross_entropy(
