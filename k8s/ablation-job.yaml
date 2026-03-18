@@ -184,7 +184,7 @@ spec:
         # 200 is a good balance between statistical reliability and runtime.
         # Use 5 for a quick smoke-test before a full run.
         - name: MAX_RECORDS
-          value: "200"
+          value: "200000"
 
         - name: MAX_SEQ_LEN
           value: "2048"

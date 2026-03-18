@@ -92,13 +92,13 @@ spec:
 
         resources:
           limits:
-            nvidia.com/a100: "1"
-            memory: "32Gi"
-            cpu: "2"
+            nvidia/gpu: "1"
+            memory: "16Gi"
+            cpu: "1"
           requests:
-            nvidia.com/a100: "1"
-            memory: "32Gi"
-            cpu: "2"
+            nvidia/gpu: "1"
+            memory: "16Gi"
+            cpu: "1"
 
         volumeMounts:
           - name: cache-volume
@@ -122,7 +122,7 @@ spec:
         - name: PROJECTS
           value: "Lang,Math,Time,Collections"
         - name: BUG_LIMIT
-          value: "20"
+          value: "50"
 
         # Pretrained LoRA adapter source on Hugging Face.
         - name: HF_ADAPTER_REPO
@@ -163,24 +163,28 @@ spec:
           effect: NoSchedule
         - effect: NoSchedule
           key: nautilus.io/hardware
+          operator: Exists
+        - effect: NoSchedule
+          key: nautilus.io/hardware
           operator: Equal
           value: large-gpu
+        - effect: NoExecute
+          key: nautilus.io/hardware
+          operator: Equal
+          value: large-gpu
+        - effect: NoSchedule
+          key: nautilus.io/testing
+          operator: Equal
+          value: "true"
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
         - effect: PreferNoSchedule
           key: nvidia.com/gpu
           operator: Exists
         - key: nautilus.io/issue
           operator: Exists
           effect: NoSchedule
-
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: nvidia.com/gpu.product
-                operator: In
-                values:
-                - NVIDIA-A100-SXM4-80GB
 
       volumes:
         - name: cache-volume
